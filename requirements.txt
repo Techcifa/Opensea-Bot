@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+web3==7.12.0
+eth-account>=0.8.0
+python-dotenv
+aiohttp
+requests
+packaging
+websockets

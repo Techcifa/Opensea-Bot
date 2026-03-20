@@ -1,0 +1,1010 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<title>⚡ NFT Minter — Control Panel</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f0f4ff;--surface:#fff;--border:#e2e8f0;
+  --text:#1e293b;--muted:#64748b;
+  --cyan:#06b6d4;--purple:#7c3aed;--pink:#ec4899;--green:#10b981;--orange:#f59e0b;--red:#ef4444;--blue:#3b82f6;
+  --grad:linear-gradient(135deg,#7c3aed,#06b6d4,#10b981);
+}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+/* ── HEADER ── */
+header{
+  background:var(--grad);background-size:300% 300%;
+  animation:gradShift 6s ease infinite;
+  padding:16px 28px;display:flex;align-items:center;justify-content:space-between;
+  box-shadow:0 4px 24px rgba(124,58,237,.3);
+}
+@keyframes gradShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+.logo{font-size:1.6rem;font-weight:900;color:#fff;letter-spacing:-1px;display:flex;align-items:center;gap:8px}
+.logo span{font-size:1.8rem}
+.header-right{display:flex;align-items:center;gap:16px}
+.gas-pill{background:rgba(255,255,255,.2);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.3);
+  border-radius:999px;padding:6px 16px;color:#fff;font-size:.8rem;font-weight:600;display:flex;align-items:center;gap:6px}
+.gas-dot{width:8px;height:8px;border-radius:50%;background:#10b981;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(1.4)}}
+.status-badge{padding:6px 14px;border-radius:999px;font-size:.75rem;font-weight:700;letter-spacing:.5px;
+  background:rgba(255,255,255,.25);color:#fff;border:1px solid rgba(255,255,255,.4)}
+.status-badge.running{background:rgba(16,185,129,.4);animation:pulseGlow 1.5s infinite}
+.status-badge.done{background:rgba(59,130,246,.4)}
+.status-badge.stopped,
+.status-badge.idle{background:rgba(255,255,255,.2)}
+@keyframes pulseGlow{0%,100%{box-shadow:0 0 0 0 rgba(16,185,129,.4)}50%{box-shadow:0 0 0 8px rgba(16,185,129,0)}}
+
+/* ── LAYOUT ── */
+.container{max-width:1440px;margin:0 auto;padding:24px;display:grid;gap:20px}
+.row{display:grid;gap:20px}
+.row-2{grid-template-columns:1fr 1fr}
+.row-3{grid-template-columns:1fr 1fr 1fr}
+
+/* ── CARDS ── */
+.card{background:var(--surface);border-radius:16px;border:1px solid var(--border);
+  box-shadow:0 2px 12px rgba(0,0,0,.06);overflow:hidden;transition:box-shadow .2s}
+.card:hover{box-shadow:0 4px 24px rgba(0,0,0,.1)}
+.card-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;
+  justify-content:space-between;font-weight:700;font-size:.9rem}
+.card-header .icon{font-size:1.1rem;margin-right:6px}
+.card-body{padding:20px}
+
+/* ── CONTROL BAR ── */
+.control-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.btn{padding:12px 28px;border-radius:12px;border:none;font-size:.95rem;font-weight:700;cursor:pointer;
+  transition:all .2s;display:flex;align-items:center;gap:8px;font-family:'Inter',sans-serif}
+.btn-launch{background:linear-gradient(135deg,#7c3aed,#06b6d4);color:#fff;box-shadow:0 4px 16px rgba(124,58,237,.4)}
+.btn-launch:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(124,58,237,.5)}
+.btn-launch:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-stop{background:linear-gradient(135deg,#ef4444,#f59e0b);color:#fff;box-shadow:0 4px 16px rgba(239,68,68,.35)}
+.btn-stop:hover{transform:translateY(-2px)}
+.btn-stop:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.btn-preflight{background:linear-gradient(135deg,#10b981,#3b82f6);color:#fff;box-shadow:0 4px 16px rgba(16,185,129,.35)}
+.btn-preflight:hover{transform:translateY(-2px)}
+.btn-sm{padding:7px 14px;font-size:.78rem;border-radius:8px;border:1px solid var(--border);
+  background:var(--bg);color:var(--text);cursor:pointer;font-weight:600;transition:all .2s}
+.btn-sm:hover{background:var(--grad);color:#fff;border-color:transparent}
+
+/* ── FORM ── */
+.form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.field input,.field select,.field textarea{
+  padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-size:.85rem;
+  background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;transition:border-color .2s;outline:none}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--purple);background:#fff}
+.field textarea{resize:vertical;font-family:'JetBrains Mono',monospace;font-size:.78rem;min-height:80px}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;
+  border-bottom:1px solid var(--border)}
+.toggle-row:last-child{border-bottom:none}
+.toggle-row label{font-size:.85rem;font-weight:500}
+.toggle{position:relative;width:44px;height:24px;cursor:pointer}
+.toggle input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:#cbd5e1;border-radius:12px;transition:.3s}
+.slider:before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;
+  background:#fff;border-radius:50%;transition:.3s;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.toggle input:checked+.slider{background:var(--purple)}
+.toggle input:checked+.slider:before{transform:translateX(20px)}
+
+/* ── KEY VAULT ── */
+.vault-wrap{position:relative}
+.vault-badge{display:inline-flex;align-items:center;gap:5px;background:#f0fdf4;border:1px solid #bbf7d0;
+  color:#166534;border-radius:8px;padding:4px 10px;font-size:.73rem;font-weight:600;margin-bottom:8px}
+.vault-lock{font-size:.85rem}
+.pwd-row{display:flex;gap:8px;margin-bottom:8px}
+.pwd-row input{flex:1;padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;
+  font-size:.85rem;background:var(--bg);color:var(--text);outline:none;transition:border-color .2s}
+.pwd-row input:focus{border-color:var(--purple);background:#fff}
+
+/* ── PREFLIGHT ── */
+.preflight-list{display:flex;flex-direction:column;gap:8px}
+.check-item{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-radius:10px;font-size:.85rem}
+.check-item.ok{background:#f0fdf4;border:1px solid #bbf7d0;color:#166534}
+.check-item.warn{background:#fffbeb;border:1px solid #fde68a;color:#92400e}
+.check-item.error{background:#fef2f2;border:1px solid #fecaca;color:#991b1b}
+.check-icon{font-size:1rem;flex-shrink:0;margin-top:1px}
+
+/* ── WORKERS GRID ── */
+#workers-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.worker-card{background:var(--bg);border:1.5px solid var(--border);border-radius:14px;
+  padding:14px;transition:all .25s;animation:fadeIn .4s ease}
+.worker-card:hover{transform:translateY(-2px);border-color:var(--purple);box-shadow:0 4px 16px rgba(124,58,237,.15)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.worker-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.worker-id{width:32px;height:32px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  font-weight:800;font-size:.85rem;color:#fff}
+.wstatus{padding:3px 10px;border-radius:999px;font-size:.68rem;font-weight:700;letter-spacing:.4px}
+.wstatus.IDLE{background:#f1f5f9;color:#64748b}
+.wstatus.INIT,.wstatus.WAITING{background:#fffbeb;color:#92400e}
+.wstatus.MINTING,.wstatus.CONFIRMING{background:#eff6ff;color:#1d4ed8;animation:blink .8s infinite}
+.wstatus.SUCCESS{background:#f0fdf4;color:#166534}
+.wstatus.FATAL,.wstatus.STOPPED{background:#fef2f2;color:#991b1b}
+@keyframes blink{50%{opacity:.5}}
+.worker-addr{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--muted);margin-bottom:6px}
+.worker-bal{font-size:1.1rem;font-weight:800;color:var(--text);margin-bottom:6px}
+.worker-action{font-size:.72rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:10px}
+.worker-footer{display:flex;align-items:center;justify-content:space-between}
+.prio-badge{padding:2px 8px;border-radius:6px;font-size:.65rem;font-weight:700}
+.prio-1{background:#fef3c7;color:#92400e}
+.prio-2{background:#e0e7ff;color:#3730a3}
+.prio-3{background:#f1f5f9;color:#64748b}
+.tx-link{font-size:.7rem;color:var(--purple);text-decoration:none;font-weight:600}
+.tx-link:hover{text-decoration:underline}
+
+/* ── LOG FEED ── */
+.log-controls{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+#log-feed{font-family:'JetBrains Mono',monospace;font-size:.75rem;height:280px;
+  overflow-y:auto;background:#0f172a;border-radius:10px;padding:12px;line-height:1.7}
+.log-line{display:flex;gap:10px;align-items:flex-start;padding:1px 0;animation:fadeIn .2s ease}
+.log-ts{color:#475569;flex-shrink:0}
+.log-lvl{flex-shrink:0;font-weight:700;min-width:52px}
+.log-wid{color:#7dd3fc;flex-shrink:0;min-width:30px}
+.log-msg{color:#e2e8f0;word-break:break-all}
+.log-lvl.INFO{color:#60a5fa}
+.log-lvl.SUCCESS{color:#34d399}
+.log-lvl.WARNING{color:#fbbf24}
+.log-lvl.ERROR,.log-lvl.FATAL{color:#f87171}
+.log-lvl.INIT{color:#a78bfa}
+
+/* ── GAS CHART ── */
+.chart-wrap{height:120px;position:relative}
+
+/* ── P&L PANEL ── */
+.pnl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:16px}
+.pnl-stat{background:var(--bg);border-radius:12px;padding:14px;border:1px solid var(--border);text-align:center}
+.pnl-label{font-size:.7rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+.pnl-val{font-size:1.3rem;font-weight:900}
+.pnl-val.green{color:var(--green)}
+.pnl-val.red{color:var(--red)}
+
+/* ── DLQ ── */
+#dlq-list{display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto}
+.dlq-item{display:flex;align-items:center;justify-content:space-between;background:#fef2f2;
+  border:1px solid #fecaca;border-radius:10px;padding:10px 14px;font-size:.8rem}
+.dlq-info{flex:1;min-width:0}
+.dlq-err{color:#991b1b;font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── HISTORY TABLE ── */
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+thead th{padding:10px 12px;text-align:left;font-weight:700;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.4px;border-bottom:2px solid var(--border)}
+tbody tr{border-bottom:1px solid var(--border);transition:background .15s}
+tbody tr:hover{background:var(--bg)}
+tbody td{padding:10px 12px;font-family:'JetBrains Mono',monospace;font-size:.75rem}
+.hash-cell{max-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── COLLAPSIBLE ── */
+.collapsible{cursor:pointer;user-select:none}
+.collapsible::after{content:'▼';margin-left:8px;font-size:.7rem;transition:transform .2s}
+.collapsible.collapsed::after{transform:rotate(-90deg)}
+.collapsible-body{overflow:hidden;transition:max-height .3s ease}
+.collapsible-body.collapsed{max-height:0!important}
+
+/* ── MISC ── */
+.section-title{font-size:1rem;font-weight:800;color:var(--text);display:flex;align-items:center;gap:8px}
+.empty-state{color:var(--muted);font-size:.85rem;text-align:center;padding:24px;font-style:italic}
+.tag{padding:2px 8px;border-radius:6px;font-size:.68rem;font-weight:700}
+.tag-cyan{background:#ecfeff;color:#0e7490}
+.tag-purple{background:#f5f3ff;color:#5b21b6}
+.tag-green{background:#f0fdf4;color:#166534}
+.divider{border:none;border-top:2px solid var(--border);margin:8px 0}
+.flex{display:flex}.flex-between{justify-content:space-between}.flex-center{align-items:center}
+.gap-8{gap:8px}.gap-12{gap:12px}
+.text-muted{color:var(--muted);font-size:.8rem}
+.anim-spin{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+
+<!-- Premium theme overrides (loaded after base styles) -->
+<style>
+:root{
+  --bg:#070a12;
+  --surface:rgba(255,255,255,.04);
+  --border:rgba(148,163,184,.16);
+  --text:#e5e7eb;
+  --muted:#94a3b8;
+  --purple:#7c3aed;
+  --cyan:#06b6d4;
+  --green:#10b981;
+  --orange:#f59e0b;
+  --red:#ef4444;
+  --blue:#3b82f6;
+  --grad:linear-gradient(135deg, rgba(124,58,237,1), rgba(6,182,212,1), rgba(16,185,129,1));
+}
+body{
+  background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(124,58,237,.25), transparent 60%),
+    radial-gradient(900px 500px at 85% 10%, rgba(6,182,212,.18), transparent 55%),
+    radial-gradient(800px 460px at 40% 110%, rgba(16,185,129,.12), transparent 55%),
+    #070a12;
+  color:var(--text);
+}
+body.light{
+  --bg:#f7f8fc;
+  --surface:#fff;
+  --border:rgba(15,23,42,.12);
+  --text:#0f172a;
+  --muted:#64748b;
+  background:
+    radial-gradient(1100px 540px at 20% -10%, rgba(124,58,237,.16), transparent 60%),
+    radial-gradient(900px 500px at 85% 10%, rgba(6,182,212,.12), transparent 55%),
+    radial-gradient(800px 460px at 40% 110%, rgba(16,185,129,.10), transparent 55%),
+    #f7f8fc;
+  color:var(--text);
+}
+
+header{
+  position:sticky;top:0;z-index:10;
+  padding:14px 18px;
+  background:rgba(15,23,42,.72);
+  border-bottom:1px solid var(--border);
+  backdrop-filter:blur(12px);
+  animation:none;
+  box-shadow:none;
+}
+body.light header{background:rgba(255,255,255,.75)}
+.logo{font-size:1.1rem;letter-spacing:-.4px;color:var(--text)}
+.logo span{font-size:1.2rem}
+
+.gas-pill,.status-badge{
+  background:rgba(148,163,184,.12);
+  border:1px solid var(--border);
+  color:var(--text);
+}
+body.light .gas-pill,body.light .status-badge{background:rgba(15,23,42,.04)}
+
+.net-pill{
+  background:rgba(148,163,184,.12);
+  border:1px solid var(--border);
+  border-radius:999px;
+  padding:6px 12px;
+  color:var(--text);
+  font-size:.8rem;
+  font-weight:800;
+  display:flex;align-items:center;gap:8px;
+}
+body.light .net-pill{background:rgba(15,23,42,.04)}
+.net-dot{width:8px;height:8px;border-radius:50%;background:rgba(148,163,184,.7)}
+
+.container{gap:18px;padding:18px}
+.row{gap:18px}
+
+.card{
+  border-radius:18px;
+  border:1px solid var(--border);
+  box-shadow:0 10px 30px rgba(0,0,0,.22);
+  background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,0)) , rgba(15,23,42,.45);
+}
+body.light .card{background:var(--surface)}
+.card:hover{box-shadow:0 18px 50px rgba(0,0,0,.35)}
+.card-header{padding:16px 18px;font-weight:900;letter-spacing:.2px}
+.card-body{padding:18px}
+
+.btn{border-radius:14px}
+.btn-sm{border-radius:12px;font-weight:800}
+.btn-sm:hover{
+  color:var(--text);
+  border-color:var(--border);
+  background:rgba(148,163,184,.18);
+}
+body.light .btn-sm:hover{background:rgba(15,23,42,.06)}
+
+body:not(.light) .field input,
+body:not(.light) .field select,
+body:not(.light) .field textarea{
+  background:rgba(148,163,184,.08);
+  color:var(--text);
+}
+body.light .field input,
+body.light .field select,
+body.light .field textarea{
+  background:rgba(15,23,42,.04);
+  color:var(--text);
+}
+
+.field input,.field select,.field textarea{border-radius:14px;border:1px solid var(--border)}
+body:not(.light) .field input:focus,
+body:not(.light) .field select:focus,
+body:not(.light) .field textarea:focus{
+  background:rgba(148,163,184,.10);
+}
+.field input:focus,.field select:focus,.field textarea:focus{box-shadow:0 0 0 4px rgba(124,58,237,.22);border-color:rgba(124,58,237,.45)}
+
+/* Vault password input (was unstyled and could appear white) */
+body:not(.light) .pwd-row input{
+  background:rgba(148,163,184,.08);
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:10px 12px;
+  outline:none;
+}
+body.light .pwd-row input{
+  background:rgba(15,23,42,.04);
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:10px 12px;
+  outline:none;
+}
+body:not(.light) .pwd-row input:focus{background:rgba(148,163,184,.10);box-shadow:0 0 0 4px rgba(124,58,237,.22);border-color:rgba(124,58,237,.45)}
+
+.toggle-row{border-radius:14px;background:rgba(148,163,184,.08)}
+body.light .toggle-row{background:rgba(15,23,42,.04)}
+
+.worker-card{border-radius:18px;background:rgba(148,163,184,.06)}
+body.light .worker-card{background:rgba(15,23,42,.03)}
+.worker-card:hover{transform:translateY(-1px)}
+
+.pnl-stat{border-radius:16px;background:rgba(148,163,184,.08)}
+body.light .pnl-stat{background:rgba(15,23,42,.04)}
+
+.preflight-wrap{
+  padding:12px;
+  border-radius:16px;
+  border:1px solid var(--border);
+  background:rgba(148,163,184,.06);
+}
+body.light .preflight-wrap{background:rgba(15,23,42,.03)}
+
+.check-item{border-radius:14px}
+body:not(.light) .check-item.ok{background:rgba(16,185,129,.10);border:1px solid rgba(16,185,129,.20);color:var(--text)}
+body:not(.light) .check-item.warn{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.20);color:var(--text)}
+body:not(.light) .check-item.error{background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.20);color:var(--text)}
+body:not(.light) .check-item strong{color:var(--text)}
+
+#log-feed{
+  border:1px solid var(--border);
+  background:rgba(2,6,23,.86);
+}
+body.light #log-feed{background:#0b1220}
+
+@media (max-width: 920px){
+  header{position:relative}
+}
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ── -->
+<header>
+  <div class="logo"><span>⚡</span> NFT Minter</div>
+  <div class="header-right">
+    <div class="net-pill" title="Active network (from config)">
+      <span class="net-dot"></span><span id="net-pill">ETH</span>
+    </div>
+    <div class="gas-pill"><span class="gas-dot" id="gas-dot"></span>
+      <span id="gas-display">Loading gas...</span>
+    </div>
+    <span class="status-badge idle" id="bot-status-badge">IDLE</span>
+    <button class="btn-sm" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">Theme</button>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ── ROW 1: GAS CHART + CONTROL ── -->
+<div class="row row-2">
+  <div class="card">
+    <div class="card-header">
+      <span><span class="icon">📈</span>Gas Price — 30min</span>
+      <span class="text-muted" id="gas-gwei-label">— Gwei</span>
+    </div>
+    <div class="card-body" style="padding:14px">
+      <div class="chart-wrap"><canvas id="gasChart"></canvas></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><span class="icon">🎮</span>Controls</div>
+    <div class="card-body">
+      <div class="control-bar">
+        <button class="btn btn-launch" id="btn-launch" onclick="launchBot()">▶ LAUNCH BOT</button>
+        <button class="btn btn-stop" id="btn-stop" onclick="stopBot()" disabled>■ STOP</button>
+        <button class="btn btn-preflight" onclick="runPreflight()">🔍 PREFLIGHT</button>
+
+      </div>
+      <div class="preflight-wrap" style="margin-top:16px" id="preflight-area"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── ROW 2: CONFIG + KEY VAULT ── -->
+<div class="row row-2">
+<div class="card">
+  <div class="card-header">
+    <span class="collapsible" id="cfg-toggle" onclick="toggleSection('cfg-body','cfg-toggle')">
+      <span class="icon">⚙️</span>Configuration
+    </span>
+    <span class="tag tag-cyan">Click to expand</span>
+  </div>
+  <div class="collapsible-body collapsed" id="cfg-body" style="max-height:0">
+    <div class="card-body">
+      <div class="form-grid">
+        <div class="field"><label>Network</label>
+          <select id="cfg-network">
+            <option>ETH</option><option>BASE</option><option>OP</option>
+            <option>ARB</option><option>POLY</option><option>AVAX</option><option>BSC</option>
+          </select>
+        </div>
+        <div class="field"><label>NFT Contract</label>
+          <input id="cfg-contract" type="text" placeholder="0x...">
+        </div>
+        <div class="field"><label>Mint Quantity</label>
+          <input id="cfg-qty" type="number" value="1" min="1">
+        </div>
+        <div class="field"><label>Mint Mode</label>
+          <select id="cfg-mode">
+            <option value="DIRECT">DIRECT</option>
+            <option value="PROXY">PROXY (MultiMint)</option>
+            <option value="SEADROP">SEADROP</option>
+            <option value="SEADROP_WL">SEADROP_WL (Allowlist)</option>
+          </select>
+        </div>
+        <div class="field"><label>OpenSea API Key (Required for SEADROP_WL)</label>
+          <input id="cfg-os-api" type="password" placeholder="sk_live_...">
+        </div>
+        <div class="field"><label>Function Name</label>
+          <input id="cfg-func" type="text" value="mint" placeholder="mint / publicMint / claim">
+        </div>
+        <div class="field"><label>Max Workers</label>
+          <input id="cfg-workers" type="number" value="5" min="1">
+        </div>
+        <div class="field"><label>Gas Ceiling (Gwei)</label>
+          <input id="cfg-gas-ceil" type="number" value="80">
+        </div>
+        <div class="field"><label>Max Gas Limit (Gwei)</label>
+          <input id="cfg-gas-max" type="number" value="50">
+        </div>
+        <div class="field"><label>Pre-sign Gas Limit</label>
+          <input id="cfg-presign-gas" type="number" value="300000">
+        </div>
+        <div class="field"><label>Retry Delay Min (s)</label>
+          <input id="cfg-delay-min" type="number" value="1.5" step="0.5">
+        </div>
+        <div class="field"><label>Retry Delay Max (s)</label>
+          <input id="cfg-delay-max" type="number" value="3.0" step="0.5">
+        </div>
+        <div class="field"><label>Recipient (cold wallet)</label>
+          <input id="cfg-recipient" type="text" placeholder="0x...">
+        </div>
+      </div>
+      <hr class="divider" style="margin:16px 0">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px">
+        <div class="toggle-row"><label>Force Start (bypass timer)</label>
+          <label class="toggle"><input type="checkbox" id="tog-force"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>God Mode (pre-sign TX)</label>
+          <label class="toggle"><input type="checkbox" id="tog-presign"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>Flashbots Mode</label>
+          <label class="toggle"><input type="checkbox" id="tog-flashbots"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>Auto-Funder</label>
+          <label class="toggle"><input type="checkbox" id="tog-fund"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>Auto-Transfer NFTs</label>
+          <label class="toggle"><input type="checkbox" id="tog-transfer"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>Dust Sweeper</label>
+          <label class="toggle"><input type="checkbox" id="tog-sweep"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>Discord Notifications</label>
+          <label class="toggle"><input type="checkbox" id="tog-discord"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>Anti-Honeypot Verifier</label>
+          <label class="toggle"><input type="checkbox" id="tog-verify"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-row"><label>Accountant (CSV log)</label>
+          <label class="toggle"><input type="checkbox" id="tog-account"><span class="slider"></span></label>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── KEY VAULT ── -->
+<div class="card">
+  <div class="card-header">
+    <span><span class="icon">🔐</span>Key Vault</span>
+    <div class="vault-badge"><span class="vault-lock">🔒</span> Local key vault</div>
+  </div>
+  <div class="card-body">
+    <p class="text-muted" style="margin-bottom:12px">
+      Paste your private keys (one per line). Keys are kept in-memory in this page and sent only when you click Launch.
+      If you use “Encrypt &amp; Lock”, the input is encrypted locally (UI-only) to reduce accidental exposure on screen.
+    </p>
+    <div class="pwd-row">
+      <input type="password" id="vault-pwd" placeholder="Vault password (used to encrypt keys)">
+      <button class="btn-sm" onclick="encryptKeys()">🔒 Encrypt & Lock</button>
+      <button class="btn-sm" onclick="clearKeys()">🗑 Clear</button>
+    </div>
+    <div class="field">
+      <textarea id="key-input" placeholder="0xPrivateKey1&#10;0xPrivateKey2&#10;..." rows="5"></textarea>
+    </div>
+    <div id="vault-status" style="margin-top:8px;font-size:.78rem;color:var(--green);font-weight:600"></div>
+  </div>
+</div>
+</div>
+
+<!-- ── WORKERS GRID ── -->
+<div class="card">
+  <div class="card-header">
+    <span><span class="icon">⚙️</span>Workers <span id="worker-count" class="tag tag-purple" style="margin-left:6px">0 active</span></span>
+    <button class="btn-sm" onclick="clearWorkers()">Clear</button>
+  </div>
+  <div class="card-body">
+    <div id="workers-grid"><p class="empty-state">Workers will appear here after bot is launched.</p></div>
+  </div>
+</div>
+
+<!-- ── ROW: P&L + DLQ ── -->
+<div class="row row-2">
+  <div class="card">
+    <div class="card-header"><span class="icon">💰</span>Profit &amp; Loss</div>
+    <div class="card-body">
+      <div class="pnl-grid">
+        <div class="pnl-stat"><div class="pnl-label">Gas Spent</div><div class="pnl-val red" id="pnl-gas">0 ETH</div></div>
+        <div class="pnl-stat"><div class="pnl-label">Mint Cost</div><div class="pnl-val red" id="pnl-mint">0 ETH</div></div>
+        <div class="pnl-stat"><div class="pnl-label">NFTs Minted</div><div class="pnl-val" id="pnl-count" style="color:var(--blue)">0</div></div>
+        <div class="pnl-stat"><div class="pnl-label">Net P&amp;L</div><div class="pnl-val green" id="pnl-net">$ 0.00</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="collapsible" id="dlq-toggle" onclick="toggleSection('dlq-collapse','dlq-toggle')">
+        <span class="icon">☠️</span>Dead Letter Queue <span id="dlq-badge" class="tag" style="background:#fef2f2;color:#991b1b;margin-left:4px">0</span>
+      </span>
+      <button class="btn-sm" onclick="clearDLQ()">Clear All</button>
+    </div>
+    <div class="collapsible-body" id="dlq-collapse" style="max-height:300px">
+      <div class="card-body">
+        <div id="dlq-list"><p class="empty-state">No failed jobs. 🎉</p></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── LOG FEED ── -->
+<div class="card">
+  <div class="card-header">
+    <span><span class="icon">📟</span>Live Log</span>
+    <div class="flex gap-8">
+      <select class="btn-sm" id="log-filter-level" onchange="applyLogFilter()" style="padding:5px 10px">
+        <option value="">All Levels</option>
+        <option>INFO</option><option>SUCCESS</option><option>WARNING</option><option>ERROR</option><option>FATAL</option>
+      </select>
+      <input class="btn-sm" style="width:80px;padding:5px 10px" type="number" id="log-filter-worker" placeholder="Worker #" onchange="applyLogFilter()">
+      <button class="btn-sm" onclick="clearLog()">Clear</button>
+      <button class="btn-sm" onclick="exportLogs()">⬇ JSON</button>
+    </div>
+  </div>
+  <div class="card-body" style="padding:14px">
+    <div id="log-feed"></div>
+  </div>
+</div>
+
+<!-- ── HISTORY TABLE ── -->
+<div class="card">
+  <div class="card-header">
+    <span class="collapsible collapsed" id="hist-toggle" onclick="toggleSection('hist-body','hist-toggle')">
+      <span class="icon">📊</span>Transaction History
+    </span>
+    <button class="btn-sm" onclick="loadHistory()">🔄 Refresh</button>
+  </div>
+  <div class="collapsible-body collapsed" id="hist-body" style="max-height:0">
+    <div class="card-body">
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Network</th><th>Wallet</th><th>Event</th>
+            <th>TX Hash</th><th>Gas Used</th><th>Gas (Gwei)</th><th>ETH Spent</th>
+          </tr></thead>
+          <tbody id="history-body"><tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted)">Click refresh to load history.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<script>
+// ── STATE ──
+let ws=null, wsReconnectTimer=null;
+let allLogs=[], filteredLogs=[];
+let workers={};
+let gasChartData={labels:[],values:[]};
+let encryptedKeys=null, rawKeys=[];
+let botRunning=false;
+
+// ── GAS CHART ──
+const gasCtx=document.getElementById('gasChart').getContext('2d');
+const gasChart=new Chart(gasCtx,{
+  type:'line',
+  data:{labels:[],datasets:[{
+    label:'Gwei',data:[],
+    borderColor:'#7c3aed',backgroundColor:'rgba(124,58,237,.1)',
+    borderWidth:2,pointRadius:0,fill:true,tension:.4
+  }]},
+  options:{
+    responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.parsed.y.toFixed(2)+' Gwei'}}},
+    scales:{
+      x:{display:false},
+      y:{grid:{color:'rgba(0,0,0,.05)'},ticks:{font:{size:10},callback:v=>v+' Gw'}},
+    }
+  }
+});
+
+function addGasPoint(ts,gwei){
+  const t=new Date(ts*1000).toLocaleTimeString();
+  gasChart.data.labels.push(t);
+  gasChart.data.datasets[0].data.push(gwei);
+  if(gasChart.data.labels.length>72){gasChart.data.labels.shift();gasChart.data.datasets[0].data.shift()}
+  gasChart.update('none');
+}
+
+// ── WEBSOCKET ──
+function connectWS(){
+  if(ws&&ws.readyState<2)return;
+  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen=()=>{log('SYS','INFO','WebSocket connected ✓');clearInterval(wsReconnectTimer);wsReconnectTimer=null};
+  ws.onmessage=e=>{try{handleMsg(JSON.parse(e.data))}catch(err){}};
+  ws.onclose=()=>{
+    log('SYS','WARNING','WebSocket disconnected. Reconnecting...');
+    if(!wsReconnectTimer)wsReconnectTimer=setInterval(connectWS,3000);
+  };
+  ws.onerror=()=>{};
+}
+
+function handleMsg(d){
+  if(d.type==='gas_update'){updateGas(d.data,d.ts)}
+  else if(d.type==='log'){pushLog(d)}
+  else if(d.type==='worker_update'){updateWorker(d)}
+  else if(d.type==='status'){setStatus(d.status||d)}
+  else if(d.type==='ping'){if(ws)ws.send('ping')}
+}
+
+// ── GAS ──
+function updateGas(data,ts){
+  const gwei=data.max_fee_gwei||data.base_fee_gwei||0;
+  document.getElementById('gas-display').textContent=gwei.toFixed(2)+' Gwei';
+  document.getElementById('gas-gwei-label').textContent=gwei.toFixed(2)+' Gwei';
+  const dot=document.getElementById('gas-dot');
+  const cfg_ceil=parseFloat(document.getElementById('cfg-gas-ceil').value)||80;
+  dot.style.background=gwei>cfg_ceil?'#ef4444':gwei>cfg_ceil*0.7?'#f59e0b':'#10b981';
+  if(ts)addGasPoint(ts,gwei);
+}
+
+// ── STATUS ──
+function setStatus(s){
+  const badge=document.getElementById('bot-status-badge');
+  const status=(typeof s==='string'?s:s.status||'IDLE').toUpperCase();
+  badge.textContent=status;
+  badge.className='status-badge '+(status==='RUNNING'?'running':status==='DONE'?'done':'idle');
+  botRunning=status==='RUNNING'||status==='STARTING';
+  document.getElementById('btn-launch').disabled=botRunning;
+  document.getElementById('btn-stop').disabled=!botRunning;
+}
+
+// ── WORKERS ──
+const COLORS=['#7c3aed','#06b6d4','#10b981','#f59e0b','#ec4899','#3b82f6','#ef4444','#8b5cf6'];
+function updateWorker(d){
+  workers[d.worker_id]=d;
+  renderWorkers();
+}
+function renderWorkers(){
+  const grid=document.getElementById('workers-grid');
+  const ids=Object.keys(workers).sort((a,b)=>+a-+b);
+  if(!ids.length){grid.innerHTML='<p class="empty-state">Workers will appear here after bot is launched.</p>';return}
+  document.getElementById('worker-count').textContent=ids.length+' active';
+  grid.innerHTML=ids.map(id=>{
+    const w=workers[id];
+    const col=COLORS[(+id-1)%COLORS.length];
+    const prio=w.priority||1;
+    const txlink=w.tx_hash?`<a href="${w.explorer}/tx/${w.tx_hash}" target="_blank" class="tx-link">View TX ↗</a>`:
+      `<a href="${w.explorer||'#'}" target="_blank" class="tx-link">Explorer ↗</a>`;
+    return`<div class="worker-card">
+      <div class="worker-top">
+        <div class="worker-id" style="background:${col}">${id}</div>
+        <span class="wstatus ${w.status||'IDLE'}">${w.status||'IDLE'}</span>
+      </div>
+      <div class="worker-addr">${w.address?(w.address.slice(0,8)+'...'+w.address.slice(-4)):'-'}</div>
+      <div class="worker-bal">${w.balance||'0.00000 ETH'}</div>
+      <div class="worker-action">${w.action||'—'}</div>
+      <div class="worker-footer">
+        <span class="prio-badge prio-${Math.min(prio,3)}">P${prio}</span>
+        ${txlink}
+      </div>
+    </div>`;
+  }).join('');
+}
+function clearWorkers(){workers={};renderWorkers();document.getElementById('worker-count').textContent='0 active'}
+
+// ── LOGS ──
+function log(wid,level,msg,ts){
+  const entry={wid,level,msg,ts:ts||Math.floor(Date.now()/1000)};
+  allLogs.push(entry);
+  if(allLogs.length>2000)allLogs.shift();
+  applyLogFilter();
+}
+function pushLog(d){log(d.worker_id,d.level,d.message,d.timestamp)}
+
+function applyLogFilter(){
+  const lvl=document.getElementById('log-filter-level').value;
+  const wid=document.getElementById('log-filter-worker').value;
+  filteredLogs=allLogs.filter(e=>{
+    if(lvl&&e.level!==lvl)return false;
+    if(wid&&String(e.wid)!==String(wid))return false;
+    return true;
+  });
+  renderLogs();
+}
+function renderLogs(){
+  const feed=document.getElementById('log-feed');
+  const atBottom=feed.scrollHeight-feed.scrollTop-feed.clientHeight<40;
+  feed.innerHTML=filteredLogs.slice(-300).map(e=>{
+    const t=new Date(e.ts*1000).toLocaleTimeString();
+    return`<div class="log-line">
+      <span class="log-ts">${t}</span>
+      <span class="log-lvl ${e.level}">${e.level}</span>
+      <span class="log-wid">#${e.wid}</span>
+      <span class="log-msg">${escHtml(e.msg)}</span>
+    </div>`;
+  }).join('');
+  if(atBottom)feed.scrollTop=feed.scrollHeight;
+}
+function clearLog(){allLogs=[];filteredLogs=[];document.getElementById('log-feed').innerHTML=''}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function exportLogs(){
+  const blob=new Blob([JSON.stringify(allLogs,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mint_log.json';a.click();
+}
+
+// ── KEY VAULT (AES-256-GCM) ──
+async function deriveKey(password){
+  const enc=new TextEncoder();
+  const keyMaterial=await crypto.subtle.importKey('raw',enc.encode(password),{name:'PBKDF2'},false,['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {name:'PBKDF2',salt:enc.encode('nft-minter-salt-v2'),iterations:100000,hash:'SHA-256'},
+    keyMaterial,{name:'AES-GCM',length:256},false,['encrypt','decrypt']
+  );
+}
+async function encryptKeys(){
+  const pwd=document.getElementById('vault-pwd').value;
+  const raw=document.getElementById('key-input').value.trim().split('\n').filter(k=>k.trim());
+  if(!pwd){alert('Enter a vault password first.');return}
+  if(!raw.length){alert('No keys entered.');return}
+  const key=await deriveKey(pwd);
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const enc=new TextEncoder();
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(JSON.stringify(raw)));
+  encryptedKeys={iv:Array.from(iv),ct:Array.from(new Uint8Array(ct))};
+  rawKeys=raw;
+  document.getElementById('key-input').value='[ENCRYPTED — '+raw.length+' key(s)]';
+  document.getElementById('vault-pwd').value='';
+  document.getElementById('vault-status').textContent='✅ '+raw.length+' key(s) encrypted with AES-256-GCM. Ready to launch.';
+  log('SYS','SUCCESS',raw.length+' keys encrypted in vault.');
+}
+function clearKeys(){
+  encryptedKeys=null;rawKeys=[];
+  document.getElementById('key-input').value='';
+  document.getElementById('vault-pwd').value='';
+  document.getElementById('vault-status').textContent='';
+}
+
+// ── CONFIG BUILDER ──
+function buildConfigOverrides(){
+  const cfg={
+    NETWORK:document.getElementById('cfg-network').value,
+    NFT_CONTRACT_ADDRESS:document.getElementById('cfg-contract').value,
+    MINT_QUANTITY:document.getElementById('cfg-qty').value,
+    MINT_MODE:document.getElementById('cfg-mode').value,
+    MINT_FUNC_NAME:document.getElementById('cfg-func').value,
+    MAX_WORKERS:document.getElementById('cfg-workers').value,
+    GAS_CEILING_GWEI:document.getElementById('cfg-gas-ceil').value,
+    MAX_GAS_LIMIT:document.getElementById('cfg-gas-max').value,
+    PRE_SIGN_GAS_LIMIT:document.getElementById('cfg-presign-gas').value,
+    RETRY_DELAY_MIN:document.getElementById('cfg-delay-min').value,
+    RETRY_DELAY_MAX:document.getElementById('cfg-delay-max').value,
+    RECIPIENT_ADDRESS:document.getElementById('cfg-recipient').value,
+    FORCE_START:document.getElementById('tog-force').checked?'true':'false',
+    PRE_SIGN_ENABLED:document.getElementById('tog-presign').checked?'true':'false',
+    FLASHBOTS_MODE:document.getElementById('tog-flashbots').checked?'true':'false',
+    AUTO_FUND_ENABLED:document.getElementById('tog-fund').checked?'true':'false',
+    AUTO_TRANSFER_ENABLED:document.getElementById('tog-transfer').checked?'true':'false',
+    AUTO_SWEEP_ETH:document.getElementById('tog-sweep').checked?'true':'false',
+    DISCORD_ENABLED:document.getElementById('tog-discord').checked?'true':'false',
+    VERIFY_CONTRACT_ENABLED:document.getElementById('tog-verify').checked?'true':'false',
+    ACCOUNTANT_ENABLED:document.getElementById('tog-account').checked?'true':'false',
+  };
+  const osKey=document.getElementById('cfg-os-api').value.trim();
+  if(osKey)cfg.OS_API_KEY=osKey;
+  return cfg;
+}
+function getKeys(){
+  if(rawKeys.length)return rawKeys;
+  const raw=document.getElementById('key-input').value.trim().split('\n').filter(k=>k.trim()&&!k.includes('ENCRYPTED'));
+  return raw;
+}
+
+// ── BOT CONTROL ──
+async function launchBot(){
+  const keys=getKeys();
+  if(!keys.length){alert('Add private keys to the Key Vault first.');return}
+  document.getElementById('btn-launch').disabled=true;
+  log('SYS','INFO','Sending launch command...');
+  try{
+    const r=await fetch('/api/start',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({keys,config_overrides:buildConfigOverrides()})
+    });
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'Start failed');
+    log('SYS','SUCCESS','Bot started with '+d.workers+' workers.');
+    setStatus('STARTING');
+  }catch(e){
+    log('SYS','ERROR','Launch failed: '+e.message);
+    document.getElementById('btn-launch').disabled=false;
+  }
+}
+async function stopBot(){
+  log('SYS','WARNING','Sending stop command...');
+  await fetch('/api/stop',{method:'POST'});
+  setStatus('STOPPED');
+}
+
+// ── PREFLIGHT ──
+async function runPreflight(){
+  const keys=getKeys();
+  if(!keys.length){alert('Add keys first.');return}
+  const area=document.getElementById('preflight-area');
+  area.innerHTML='<p class="text-muted">⏳ Running preflight checks...</p>';
+  try{
+    const r=await fetch('/api/preflight',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({keys, config_overrides: buildConfigOverrides()})
+    });
+    const d=await r.json();
+    const icons={ok:'✅',warn:'⚠️',error:'❌'};
+    area.innerHTML='<div class="preflight-list">'+
+      d.checks.map(c=>`<div class="check-item ${c.status}">
+        <span class="check-icon">${icons[c.status]||'ℹ️'}</span>
+        <div><strong>${c.label}</strong> — ${c.detail||''}</div>
+      </div>`).join('')+
+      '</div>';
+  }catch(e){
+    area.innerHTML='<p class="text-muted">Preflight error: '+e.message+'</p>';
+  }
+}
+
+// ── HISTORY ──
+async function loadHistory(){
+  try{
+    const r=await fetch('/api/history');
+    const d=await r.json();
+    const body=document.getElementById('history-body');
+    if(!d.rows||!d.rows.length){
+      body.innerHTML='<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted)">No history yet.</td></tr>';
+    }else{
+      body.innerHTML=d.rows.map(row=>`<tr>
+        <td>${row.timestamp||'-'}</td>
+        <td><span class="tag tag-cyan">${row.network||'-'}</span></td>
+        <td class="hash-cell">${row.wallet||'-'}</td>
+        <td><span class="tag tag-green">${row.event||'-'}</span></td>
+        <td class="hash-cell"><a href="#" class="tx-link">${row.tx_hash?row.tx_hash.slice(0,16)+'...':'-'}</a></td>
+        <td>${row.gas_used||'-'}</td>
+        <td>${row.gas_price_gwei||'-'}</td>
+        <td style="font-weight:700;color:var(--red)">${row.eth_spent||'-'}</td>
+      </tr>`).join('');
+      // Update P&L
+      calcPnL(d.rows);
+    }
+  }catch(e){log('SYS','ERROR','History load failed: '+e.message)}
+}
+function calcPnL(rows){
+  let gas=0, mint=0, count=0;
+  rows.forEach(r=>{
+    gas+=parseFloat(r.gas_price_gwei||0)*parseFloat(r.gas_used||0)/1e9;
+    mint+=parseFloat(r.eth_spent||0);
+    if(r.event==='MINT')count++;
+  });
+  document.getElementById('pnl-gas').textContent=gas.toFixed(6)+' ETH';
+  document.getElementById('pnl-mint').textContent=mint.toFixed(6)+' ETH';
+  document.getElementById('pnl-count').textContent=count;
+  // Net = rough estimate (floor value unknown without API)
+  const net=-(gas+mint);
+  const el=document.getElementById('pnl-net');
+  el.textContent=(net>=0?'+':'')+net.toFixed(5)+' ETH';
+  el.className='pnl-val '+(net>=0?'green':'red');
+}
+
+// ── DLQ ──
+async function loadDLQ(){
+  try{
+    const r=await fetch('/api/dlq');
+    const d=await r.json();
+    const el=document.getElementById('dlq-list');
+    document.getElementById('dlq-badge').textContent=d.jobs.length;
+    if(!d.jobs.length){el.innerHTML='<p class="empty-state">No failed jobs. 🎉</p>';return}
+    el.innerHTML=d.jobs.map(j=>`<div class="dlq-item">
+      <div class="dlq-info">
+        <strong>Worker #${j.worker_id}</strong> — ${j.wallet}
+        <div class="dlq-err">❌ ${j.error} (attempt ${j.attempt})</div>
+      </div>
+    </div>`).join('');
+  }catch(e){}
+}
+async function clearDLQ(){
+  await fetch('/api/dlq',{method:'DELETE'});
+  loadDLQ();
+}
+
+// ── GAS HISTORY ──
+async function loadGasHistory(){
+  try{
+    const r=await fetch('/api/gas-history');
+    const d=await r.json();
+    if(d.history)d.history.forEach(([ts,gwei])=>addGasPoint(ts,gwei));
+  }catch(e){}
+}
+
+// ── COLLAPSIBLE ──
+function toggleSection(bodyId,toggleId){
+  const body=document.getElementById(bodyId);
+  const tog=document.getElementById(toggleId);
+  const collapsed=body.classList.contains('collapsed');
+  if(collapsed){body.style.maxHeight=body.scrollHeight+'px';body.classList.remove('collapsed')}
+  else{body.style.maxHeight='0px';body.classList.add('collapsed')}
+  tog.classList.toggle('collapsed',!collapsed);
+}
+
+// ── INIT ──
+// Theme toggle (purely client-side)
+function toggleTheme(){
+  const isLight=document.body.classList.toggle('light');
+  try{localStorage.setItem('nft_minter_theme', isLight?'light':'dark')}catch(e){}
+}
+function initTheme(){
+  try{
+    const saved=localStorage.getItem('nft_minter_theme');
+    if(saved==='light')document.body.classList.add('light');
+  }catch(e){}
+}
+
+// Sync header network pill from config selector
+function syncNetworkPill(){
+  const sel=document.getElementById('cfg-network');
+  const pill=document.getElementById('net-pill');
+  if(sel&&pill)pill.textContent=sel.value||'ETH';
+}
+
+initTheme();
+syncNetworkPill();
+document.getElementById('cfg-network')?.addEventListener('change', syncNetworkPill);
+
+connectWS();
+loadGasHistory();
+loadDLQ();
+setInterval(loadDLQ,10000);
+setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping')},25000);
+
+// Poll status when not getting WS updates
+setInterval(async()=>{
+  try{const r=await fetch('/api/status');const d=await r.json();setStatus(d.running?'RUNNING':'IDLE')}catch(e){}
+},5000);
+
+log('SYS','INFO','Dashboard initialized. Connect your keys and launch! ⚡');
+</script>
+</body>
+</html>

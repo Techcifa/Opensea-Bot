@@ -1,0 +1,156 @@
+"""
+GasOracle — EIP-1559 aware gas price oracle.
+
+Uses eth_feeHistory to compute optimal maxFeePerGas + maxPriorityFeePerGas.
+Maintains a 30-minute rolling history for the dashboard chart.
+Enforces GAS_CEILING_GWEI — pauses worker execution if exceeded.
+"""
+
+import asyncio
+import time
+from collections import deque
+from web3 import AsyncWeb3, AsyncHTTPProvider
+
+from src.config.settings import ConfigurationManager, NETWORKS
+
+
+class GasOracle:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._cfg = ConfigurationManager()
+        self._current: dict = {}
+        # rolling 30-min history: [(timestamp, gwei_value), ...]
+        self._history: deque = deque(maxlen=360)  # 30min @ 5s interval
+        self._task: asyncio.Task | None = None
+        self._broadcast_cb = None  # set by orchestrator
+
+        net = NETWORKS.get(self._cfg.rpc_ticker, {})
+        rpc_url = net.get("rpc", ["https://eth.llamarpc.com"])[0]
+        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url))
+
+    def set_broadcast_callback(self, cb):
+        """Register a coroutine callback to broadcast gas updates."""
+        self._broadcast_cb = cb
+
+    def start(self):
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._loop())
+
+    def stop(self):
+        if self._task:
+            self._task.cancel()
+
+    def get_current(self) -> dict:
+        return self._current.copy()
+
+    def get_history(self) -> list:
+        return list(self._history)
+
+    def is_ceiling_exceeded(self) -> bool:
+        gwei = self._current.get("max_fee_gwei", 0)
+        return gwei > self._cfg.gas_ceiling_gwei
+
+    async def get_tx_params(self) -> dict:
+        """Return EIP-1559 gas params for building a transaction."""
+        if self._current:
+            return {
+                "maxFeePerGas": self._current.get("max_fee_wei", 0),
+                "maxPriorityFeePerGas": self._current.get("priority_fee_wei", 0),
+            }
+        # Fallback: fetch right now
+        await self._fetch()
+        return {
+            "maxFeePerGas": self._current.get("max_fee_wei", 0),
+            "maxPriorityFeePerGas": self._current.get("priority_fee_wei", 0),
+        }
+
+    async def bump_gas_params(self, original_params: dict, attempt: int = 1) -> dict:
+        """Exponentially bump gas for stuck-TX resubmission."""
+        factor = min(1.0 + 0.12 * attempt, self._cfg.max_gas_bump_multiplier)
+        return {
+            "maxFeePerGas": int(original_params.get("maxFeePerGas", 0) * factor),
+            "maxPriorityFeePerGas": int(original_params.get("maxPriorityFeePerGas", 0) * factor),
+        }
+
+    # ------------------------------------------------------------------
+    async def _loop(self):
+        while True:
+            try:
+                await self._fetch()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+    async def _fetch(self):
+        try:
+            # EIP-1559 fee history — last 5 blocks, 25th / 75th percentile priority fees
+            history = await self._w3.eth.fee_history(5, "latest", [25, 75])
+            base_fees = history.get("baseFeePerGas", [])
+            prio_fees = history.get("reward", [])
+
+            if base_fees:
+                latest_base = base_fees[-1]
+            else:
+                latest_base = await self._w3.eth.gas_price
+
+            if prio_fees:
+                avg_prio = sum(row[0] for row in prio_fees) // len(prio_fees)
+            else:
+                avg_prio = int(1e9)  # 1 Gwei default priority tip
+
+            # maxFeePerGas = 2x base fee + priority tip (EIP-1559 best practice)
+            max_fee = int(latest_base * 2) + avg_prio
+
+            self._current = {
+                "base_fee_wei": latest_base,
+                "priority_fee_wei": avg_prio,
+                "max_fee_wei": max_fee,
+                "base_fee_gwei": round(latest_base / 1e9, 2),
+                "max_fee_gwei": round(max_fee / 1e9, 2),
+            }
+
+            ts = int(time.time())
+            self._history.append((ts, self._current["max_fee_gwei"]))
+
+            if self._broadcast_cb:
+                try:
+                    await self._broadcast_cb({
+                        "type": "gas_update",
+                        "data": self._current,
+                        "ts": ts,
+                    })
+                except Exception:
+                    pass
+
+        except Exception:
+            # Fallback to legacy gas price if EIP-1559 not supported
+            try:
+                price = await self._w3.eth.gas_price
+                gwei = round(price / 1e9, 2)
+                self._current = {
+                    "base_fee_wei": price,
+                    "priority_fee_wei": 0,
+                    "max_fee_wei": price,
+                    "base_fee_gwei": gwei,
+                    "max_fee_gwei": gwei,
+                }
+                ts = int(time.time())
+                self._history.append((ts, gwei))
+            except Exception:
+                pass
+
+
+# Singleton
+gas_oracle = GasOracle()

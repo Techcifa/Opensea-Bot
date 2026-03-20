@@ -1,0 +1,19 @@
+# Environments
+venv/
+env/
+.env
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Application specific
+history.csv
+app.log
+proxies.txt
+
+# OS generated files
+.DS_Store
+Thumbs.db
