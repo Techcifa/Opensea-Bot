@@ -1,9 +1,94 @@
-Unclosed client session
-client_session: <aiohttp.client.ClientSession object at 0x0000012AA3A28EC0>
-use lifespan event handlers instead.
+C:\Users\Dell\Desktop\Opensea Bot\server.py:75: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
 
         Read more about it in the
-        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
-        
-  @app.on_event("startup")
-ERROR:    [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8000): [winerror 10048] only one usage of each socket address (protocol/network address/port) is normally permitted
+        [FastAPI docs for LUnclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3B30050>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3CBA660>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3CB8830>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3CB9010>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3CBA900>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA55446E0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5545BE0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5544980>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA544EBA0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA539BCB0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5399D30>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA554AE40>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3911FD0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA54CFE00>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA39130E0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3913380>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA555E3C0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA53116A0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA555E270>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5B0C830>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5B0F0E0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5548AD0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA554B4D0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA552F0E0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5312900>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5312E40>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5A3EA50>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA543D7F0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA37A6CF0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA54F23C0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3B33620>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5607230>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5604D70>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA55BA270>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA55B8C20>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA55B8050>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5A3DBE0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5310830>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA54F16A0>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA54F0440>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA55B8590>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3B30D70>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA5604590>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA54F1E80>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x0000012AA3A2ACF0>

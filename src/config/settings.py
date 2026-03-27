@@ -239,7 +239,7 @@ class ConfigurationManager:
             self.discord_enabled = False
 
         # Accountant
-        self.accountant_enabled = self._bool("ACCOUNTANT_ENABLED")
+        self.accountant_enabled = self._bool("ACCOUNTANT_ENABLED", "true")
 
         # Verifier
         self.verifier_enabled = self._bool("VERIFY_CONTRACT_ENABLED")
@@ -249,8 +249,8 @@ class ConfigurationManager:
         self.os_api_key = os.getenv("OS_API_KEY", "")
 
     # ------------------------------------------------------------------
-    def _bool(self, key: str) -> bool:
-        return os.getenv(key, "false").strip().lower() in ("true", "1", "yes", "on")
+    def _bool(self, key: str, default: str = "false") -> bool:
+        return os.getenv(key, default).strip().lower() in ("true", "1", "yes", "on")
 
     def _safe_float(self, attr: str, key: str, default: float):
         try:

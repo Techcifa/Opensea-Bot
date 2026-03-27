@@ -22,6 +22,7 @@ import time
 import random
 import aiohttp
 from datetime import datetime
+from typing import Callable, Any
 
 from web3 import AsyncWeb3, AsyncHTTPProvider
 from eth_account import Account
@@ -43,6 +44,21 @@ FLASHBOTS_URL = "https://relay.flashbots.net"
 
 
 class ExecutionUnit:
+    _pk: str
+    _uid: int
+    _cfg: ConfigurationManager
+    _acct: Account
+    _broadcast: Callable[[dict], Any] | None
+    _chain_id: int
+    _symbol: str
+    _explorer: str
+    _rpc_list: list[str]
+    _rpc_index: int
+    _proxy_url: str | None
+    w3: AsyncWeb3
+    _nonce_mgr: NonceManager
+    _priority: int
+
     def __init__(self, pkey: str, uid: int, global_config: ConfigurationManager, broadcast=None):
         self._pk = pkey
         self._uid = uid
@@ -104,14 +120,14 @@ class ExecutionUnit:
             "tx_hash": tx_hash,
             "timestamp": int(t.time()),
         }
-        if self._broadcast:
+        if self._broadcast is not None:
             try:
                 await self._broadcast(payload)
             except Exception:
                 pass
 
     async def _update_worker(self, status: str, balance: str = "", action: str = ""):
-        if self._broadcast:
+        if self._broadcast is not None:
             try:
                 await self._broadcast({
                     "type": "worker_update",
@@ -121,7 +137,7 @@ class ExecutionUnit:
                     "balance": balance,
                     "action": action,
                     "priority": self._priority,
-                    "explorer": f"{self._explorer}/address/{self._acct.address}",
+                    "explorer": f"{str(self._explorer)}/address/{self._acct.address}",
                 })
             except Exception:
                 pass
@@ -173,6 +189,74 @@ class ExecutionUnit:
                 return False, reason[:120]
             # Other errors (network, etc.) — allow through
             return True, ""
+
+    # ------------------------------------------------------------------
+    # RPC Race Strategy (Parallel Broadcast)
+    # ------------------------------------------------------------------
+    async def _broadcast_parallel(self, signed_raw_tx: bytes) -> bytes:
+        """
+        Broadcast the same signed raw TX to multiple RPCs simultaneously.
+        Returns the hash of the first successful propagation.
+        """
+        rpcs = rpc_health.get_prioritized_rpcs(self._cfg.rpc_ticker)
+        # Limit to top 5 healthy nodes to avoid spamming/overhead
+        targets = rpcs[:5]
+        
+        await self._log("INFO", f"🚀 [Race Strategy] Broadcasting to {len(targets)} nodes simultaneously...")
+        
+        async def _single_broadcast(url: str):
+            # Create temporary w3 for this specific node
+            kwargs = {"proxy": self._proxy_url} if self._proxy_url else {}
+            w3_node = AsyncWeb3(AsyncHTTPProvider(url, request_kwargs=kwargs))
+            try:
+                # Use rate limiter if possible
+                async with rpc_limiter.acquire(url):
+                    tx_hash = await w3_node.eth.send_raw_transaction(signed_raw_tx)
+                    rpc_health.stats[url]["score"] = min(1.0, rpc_health.stats[url].get("score", 0.5) + 0.05)
+                    return tx_hash, url
+            except Exception as e:
+                # Penalize score for failure
+                if url in rpc_health.stats:
+                    rpc_health.stats[url]["score"] = max(0.0, rpc_health.stats[url]["score"] - 0.1)
+                raise e
+
+        tasks = [asyncio.create_task(_single_broadcast(url)) for url in targets]
+        
+        if not tasks:
+            raise Exception("No healthy RPCs available for broadcast!")
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        
+        # Clean up pending tasks (we land the first one)
+        for p in pending:
+            p.cancel()
+
+        first_res: tuple[bytes, str] | None = None
+        for task in done:
+            try:
+                res = task.result()
+                if isinstance(res, tuple):
+                    first_res = res
+                    break
+            except Exception:
+                continue
+
+        if first_res is not None:
+            tx_h: bytes = first_res[0]
+            win_url: str = first_res[1]
+            h_str = tx_h.hex()
+            u_str = str(win_url)
+            await self._log("SUCCESS", f"⚡ Node Won: {u_str[:30]}... | Hash: {h_str[:10]}")
+            return tx_h
+        
+        # If all failed, try to get error from any done task
+        error_msg = "All parallel broadcast tasks failed"
+        for task in done:
+            try:
+                task.result()
+            except Exception as e:
+                error_msg = str(e)
+        raise Exception(error_msg)
 
     # ------------------------------------------------------------------
     # Flashbots submission
@@ -410,7 +494,8 @@ class ExecutionUnit:
                     continue
 
                 # Broadcast pre-signed TX first
-                if pre_signed_raw:
+                local_pre_signed = pre_signed_raw
+                if local_pre_signed is not None:
                     if pre_signed_required_wei is not None and bal_wei < pre_signed_required_wei:
                         gap = (pre_signed_required_wei - bal_wei) / 1e18
                         await self._log("WARNING", f"Insufficient balance for value+gas. Deficit: {gap:.5f} {self._symbol}. Waiting...")
@@ -418,7 +503,7 @@ class ExecutionUnit:
                         await asyncio.sleep(random.uniform(*self._cfg.delay_range))
                         continue
                     await self._log("INFO", "🚀 Broadcasting pre-signed TX...")
-                    tx_hash = await self.w3.eth.send_raw_transaction(pre_signed_raw)
+                    tx_hash = await self._broadcast_parallel(local_pre_signed)
                     pre_signed_raw = None
                     pre_signed_required_wei = None
                 else:
@@ -463,7 +548,7 @@ class ExecutionUnit:
                         tx_hash_str = await self._send_via_flashbots(signed.raw_transaction)
                         tx_hash = bytes.fromhex(tx_hash_str.lstrip("0x"))
                     else:
-                        tx_hash = await self.w3.eth.send_raw_transaction(signed.raw_transaction)
+                        tx_hash = await self._broadcast_parallel(signed.raw_transaction)
                         self._nonce_mgr.confirm(nonce)
 
                 await self._log("INFO", f"TX Broadcast: {tx_hash.hex()}", tx_hash.hex())
@@ -479,6 +564,11 @@ class ExecutionUnit:
                     return
                 else:
                     await self._log("ERROR", "TX reverted on-chain.")
+                    if self._cfg.accountant_enabled:
+                        Accountant.log_transaction(
+                            self._cfg.rpc_ticker, self._acct.address,
+                            "REVERT", tx_hash.hex(), receipt, total_value
+                        )
                     self._nonce_mgr.fail(nonce if 'nonce' in locals() else 0)
                     # Try again
                     await asyncio.sleep(random.uniform(*self._cfg.delay_range))
