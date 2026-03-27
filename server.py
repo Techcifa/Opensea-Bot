@@ -38,7 +38,54 @@ from src.utils.rpc_health import rpc_health
 
 SystemCompliance.assert_version()
 
+# ---------------------------------------------------------------------------
+# Session Persistence
+# ---------------------------------------------------------------------------
+SESSION_FILE = "session.json"
+
+class SessionStore:
+    @staticmethod
+    def save(keys, overrides):
+        try:
+            with open(SESSION_FILE, "w") as f:
+                json.dump({"keys": keys, "overrides": overrides}, f)
+        except Exception:
+            pass
+
+    @staticmethod
+    def load():
+        if not os.path.exists(SESSION_FILE):
+            return None
+        try:
+            with open(SESSION_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    @staticmethod
+    def clear():
+        if os.path.exists(SESSION_FILE):
+            try:
+                os.remove(SESSION_FILE)
+            except Exception:
+                pass
+
 app = FastAPI(title="NFT Minter", version="2.0.0")
+
+@app.on_event("startup")
+async def startup_event():
+    """Resume session if exists on startup."""
+    session = SessionStore.load()
+    if session:
+        print(f"[*] Found existing session. Resuming bot with {len(session['keys'])} workers...")
+        # Re-apply overrides
+        overrides = session.get("overrides")
+        if isinstance(overrides, dict):
+            for k, v in overrides.items():
+                os.environ[str(k)] = str(v)
+            ConfigurationManager._instance = None
+        
+        asyncio.create_task(orchestrator.start(session["keys"]))
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +119,13 @@ async def start_bot(req: StartRequest):
         raise HTTPException(status_code=400, detail="No private keys provided.")
 
     # Apply any session config overrides (modify env vars in-process)
-    if req.config_overrides:
+    if req.config_overrides and isinstance(req.config_overrides, dict):
         skip_empty = {"OS_API_KEY"}  # allow .env to provide secrets unless explicitly set
         for k, v in req.config_overrides.items():
             val = "" if v is None else str(v)
             if k in skip_empty and val == "":
                 continue
-            os.environ[k] = val
+            os.environ[str(k)] = val
             
     # Reset singleton so overrides take effect
     ConfigurationManager._instance = None
@@ -87,6 +134,9 @@ async def start_bot(req: StartRequest):
     if not cfg.target_nft or cfg.target_nft.startswith("0xYour"):
         raise HTTPException(status_code=400, detail="NFT_CONTRACT_ADDRESS is not configured in .env")
 
+    # Save session for persistence
+    SessionStore.save(req.keys, req.config_overrides)
+
     asyncio.create_task(orchestrator.start(req.keys))
     return {"status": "starting", "workers": len(req.keys)}
 
@@ -94,6 +144,7 @@ async def start_bot(req: StartRequest):
 @app.post("/api/stop")
 async def stop_bot():
     await orchestrator.stop()
+    SessionStore.clear()
     return {"status": "stopped"}
 
 
@@ -105,13 +156,13 @@ async def preflight(req: PreflightRequest):
     if not req.keys:
         raise HTTPException(status_code=400, detail="No keys provided for preflight.")
         
-    if req.config_overrides:
+    if req.config_overrides and isinstance(req.config_overrides, dict):
         skip_empty = {"OS_API_KEY"}  # allow .env to provide secrets unless explicitly set
         for k, v in req.config_overrides.items():
             val = "" if v is None else str(v)
             if k in skip_empty and val == "":
                 continue
-            os.environ[k] = val
+            os.environ[str(k)] = val
     # Reset singleton so overrides take effect for Preflight Check
     ConfigurationManager._instance = None
             

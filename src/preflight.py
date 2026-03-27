@@ -3,6 +3,7 @@ PreflightChecker — validates config and wallet readiness before starting.
 """
 
 import asyncio
+import os
 from web3 import AsyncWeb3, AsyncHTTPProvider
 
 from src.config.settings import ConfigurationManager, NETWORKS, ContractSpecs
@@ -19,6 +20,41 @@ class PreflightChecker:
         net_info = NETWORKS.get(self._cfg.rpc_ticker, {})
         self._symbol = net_info.get("symbol", "ETH")
         self._explorer = net_info.get("explorer", "https://etherscan.io")
+
+    async def _estimate_gas_cost_wei(self) -> int:
+        """
+        Estimate a worst-case gas cost in wei for preflight balance checks.
+
+        Uses EIP-1559 feeHistory when available; falls back to legacy gas_price.
+        Configurable via env:
+          - PREFLIGHT_GAS_LIMIT (default 300000)
+          - PREFLIGHT_GAS_MULTIPLIER (default 1.2)
+        """
+        try:
+            gas_limit = int(float(os.getenv("PREFLIGHT_GAS_LIMIT", "300000")))
+        except Exception:
+            gas_limit = 300_000
+
+        try:
+            mult = float(os.getenv("PREFLIGHT_GAS_MULTIPLIER", "1.2"))
+        except Exception:
+            mult = 1.2
+
+        try:
+            history = await asyncio.wait_for(self._w3.eth.fee_history(5, "latest", [25, 75]), timeout=5)
+            base_fees = history.get("baseFeePerGas", [])
+            prio_fees = history.get("reward", [])
+            latest_base = base_fees[-1] if base_fees else await self._w3.eth.gas_price
+            avg_prio = (sum(row[0] for row in prio_fees) // len(prio_fees)) if prio_fees else int(1e9)
+            max_fee = int(latest_base * 2) + avg_prio
+            max_fee = int(max_fee * mult)
+            return int(gas_limit * max_fee)
+        except Exception:
+            try:
+                gas_price = await asyncio.wait_for(self._w3.eth.gas_price, timeout=5)
+                return int(gas_limit * int(gas_price * mult))
+            except Exception:
+                return 0
 
     async def run(self) -> list[dict]:
         """Returns a list of check results: {label, status, detail}"""
@@ -82,8 +118,8 @@ class PreflightChecker:
         except Exception:
             mint_price_wei = 0
 
-        # Rough gas estimate (300k gas @ 20 gwei)
-        gas_estimate_wei = 300_000 * int(20e9)
+        # Gas estimate (dynamic; configurable)
+        gas_estimate_wei = await self._estimate_gas_cost_wei()
         min_required_wei = mint_price_wei * self._cfg.qty + gas_estimate_wei
 
         for i, pk in enumerate(self._keys):

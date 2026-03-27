@@ -1,6 +1,6 @@
 import json
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # type: ignore
 
 load_dotenv()
 
@@ -102,6 +102,48 @@ class ConfigurationManager:
     """Singleton configuration loader — reads all settings from .env."""
 
     _instance = None
+    
+    # Types for static analysis
+    rpc_ticker: str
+    sea_addr: str
+    multi_addr: str
+    target_nft: str
+    qty: int
+    max_threads: int
+    delay_range: tuple[float, float]
+    gas_gwei: str | None
+    max_gas_limit: float
+    gas_ceiling_gwei: float
+    bump_after_blocks: int
+    max_gas_bump_multiplier: float
+    force_start: bool
+    mint_mode: str
+    mint_func_name: str
+    presign_enabled: bool
+    presign_gas_mult: float
+    presign_gas_limit: int
+    flashbots_mode: bool
+    use_proxies: bool
+    proxies: list[str]
+    fund_enabled: bool
+    master_pk: str
+    min_worker_balance: float
+    funding_amount: float
+    sweep_enabled: bool
+    min_sweep_eth: float
+    transfer_enabled: bool
+    recipient: str
+    worker_priority: list[int]
+    retry_limit: int
+    retry_delay_s: float
+    post_mint_list_price: float | None
+    rarity_threshold: int | None
+    discord_enabled: bool
+    webhook_url: str
+    accountant_enabled: bool
+    verifier_enabled: bool
+    explorer_api_key: str
+    os_api_key: str
 
     def __new__(cls):
         if cls._instance is None:

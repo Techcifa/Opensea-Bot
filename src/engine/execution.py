@@ -129,6 +129,13 @@ class ExecutionUnit:
     # ------------------------------------------------------------------
     # Gas helpers
     # ------------------------------------------------------------------
+    def _required_balance_wei(self, tx: dict) -> int:
+        gas = int(tx.get("gas") or 0)
+        value = int(tx.get("value") or 0)
+        price = int(tx.get("maxFeePerGas") or tx.get("gasPrice") or 0)
+        required = value + gas * price
+        return int(required * 1.02)
+
     async def _get_gas_params(self) -> dict:
         """Return EIP-1559 gas params, respecting manual override."""
         if self._cfg.gas_gwei:
@@ -333,6 +340,7 @@ class ExecutionUnit:
         # ---- Time Sniper ----
         current_time = int(time.time())
         pre_signed_raw = None
+        pre_signed_required_wei = None
 
         if start_time > current_time and not self._cfg.force_start:
             wait_seconds = start_time - current_time
@@ -359,9 +367,16 @@ class ExecutionUnit:
                     tx = await self._build_mint_tx(nft_addr_c, total_value, gas_params, nonce)
                     if tx:
                         tx["gas"] = self._cfg.presign_gas_limit
-                        signed = self._acct.sign_transaction(tx)
-                        pre_signed_raw = signed.raw_transaction
-                        await self._log("SUCCESS", "TX locked. Waiting for trigger...")
+                        bal_wei_now = await self.w3.eth.get_balance(self._acct.address)
+                        req_wei = self._required_balance_wei(tx)
+                        if bal_wei_now < req_wei:
+                            await self._log("WARNING", "God Mode skipped: insufficient balance for value+gas.")
+                            self._nonce_mgr.fail(nonce)
+                        else:
+                            signed = self._acct.sign_transaction(tx)
+                            pre_signed_raw = signed.raw_transaction
+                            pre_signed_required_wei = req_wei
+                            await self._log("SUCCESS", "TX locked. Waiting for trigger...")
                 except Exception as e:
                     await self._log("ERROR", f"God Mode failed: {e}")
 
@@ -396,9 +411,16 @@ class ExecutionUnit:
 
                 # Broadcast pre-signed TX first
                 if pre_signed_raw:
+                    if pre_signed_required_wei is not None and bal_wei < pre_signed_required_wei:
+                        gap = (pre_signed_required_wei - bal_wei) / 1e18
+                        await self._log("WARNING", f"Insufficient balance for value+gas. Deficit: {gap:.5f} {self._symbol}. Waiting...")
+                        await self._update_worker("WAITING", f"{bal_eth:.5f}", "Waiting for funds (gas)")
+                        await asyncio.sleep(random.uniform(*self._cfg.delay_range))
+                        continue
                     await self._log("INFO", "🚀 Broadcasting pre-signed TX...")
                     tx_hash = await self.w3.eth.send_raw_transaction(pre_signed_raw)
                     pre_signed_raw = None
+                    pre_signed_required_wei = None
                 else:
                     # Build and sign fresh TX
                     attempt += 1
@@ -416,6 +438,15 @@ class ExecutionUnit:
                     tx = await self._build_mint_tx(nft_addr_c, total_value, gas_params, nonce)
                     if tx is None:
                         return
+
+                    required_wei = self._required_balance_wei(tx)
+                    if bal_wei < required_wei:
+                        gap = (required_wei - bal_wei) / 1e18
+                        await self._log("WARNING", f"Insufficient balance for value+gas. Deficit: {gap:.5f} {self._symbol}. Waiting...")
+                        await self._update_worker("WAITING", f"{bal_eth:.5f}", "Waiting for funds (gas)")
+                        self._nonce_mgr.fail(nonce)
+                        await asyncio.sleep(random.uniform(*self._cfg.delay_range))
+                        continue
 
                     # Simulate before broadcast
                     ok, reason = await self._simulate_tx(tx)

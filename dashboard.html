@@ -801,6 +801,7 @@ function clearKeys(){
   document.getElementById('key-input').value='';
   document.getElementById('vault-pwd').value='';
   document.getElementById('vault-status').textContent='';
+  try { localStorage.removeItem('bot_encrypted_keys'); } catch(e) {}
 }
 
 // ── CONFIG BUILDER ──
@@ -834,14 +835,37 @@ function buildConfigOverrides(){
 }
 function getKeys(){
   if(rawKeys.length)return rawKeys;
-  const raw=document.getElementById('key-input').value.trim().split('\n').filter(k=>k.trim()&&!k.includes('ENCRYPTED'));
-  return raw;
+  // If we have plain text in the input that isn't the placeholder
+  const val = document.getElementById('key-input').value.trim();
+  if(!val || val.includes('ENCRYPTED')) {
+    // We already have encryptedKeys if we are here
+    return null; // Signals we need to decrypt or use rawKeys
+  }
+  return val.split('\n').filter(k=>k.trim());
 }
 
 // ── BOT CONTROL ──
 async function launchBot(){
-  const keys=getKeys();
-  if(!keys.length){alert('Add private keys to the Key Vault first.');return}
+  let keys=getKeys();
+  
+  // If keys is null, it means we have encryptedKeys and need to decrypt them
+  if(!keys && encryptedKeys) {
+    const pwd = prompt("Enter your Vault Password to decrypt keys and launch:");
+    if(!pwd) return;
+    try {
+      const key = await deriveKey(pwd);
+      const iv = new Uint8Array(encryptedKeys.iv);
+      const ct = new Uint8Array(encryptedKeys.ct);
+      const decrypted = await crypto.subtle.decrypt({name:'AES-GCM',iv}, key, ct);
+      keys = JSON.parse(new TextDecoder().decode(decrypted));
+      log('SYS','INFO','Keys decrypted successfully.');
+    } catch(e) {
+      alert("Invalid password. Decryption failed.");
+      return;
+    }
+  }
+
+  if(!keys || !keys.length){alert('Add private keys to the Key Vault first.');return}
   document.getElementById('btn-launch').disabled=true;
   log('SYS','INFO','Sending launch command...');
   try{
@@ -853,6 +877,7 @@ async function launchBot(){
     if(!r.ok)throw new Error(d.detail||'Start failed');
     log('SYS','SUCCESS','Bot started with '+d.workers+' workers.');
     setStatus('STARTING');
+    saveSettings(); // Ensure settings are saved on launch
   }catch(e){
     log('SYS','ERROR','Launch failed: '+e.message);
     document.getElementById('btn-launch').disabled=false;
@@ -989,9 +1014,73 @@ function syncNetworkPill(){
   if(sel&&pill)pill.textContent=sel.value||'ETH';
 }
 
+// ── PERSISTENCE (localStorage) ──
+function saveSettings(){
+  const cfg = buildConfigOverrides();
+  // We don't save sensitive keys directly in plain text unless encrypted
+  // But we save everything else
+  try {
+    localStorage.setItem('bot_settings', JSON.stringify(cfg));
+    // Also save encrypted keys if they exist
+    if(encryptedKeys) localStorage.setItem('bot_encrypted_keys', JSON.stringify(encryptedKeys));
+  } catch(e) {}
+}
+
+function loadSettings(){
+  try {
+    const saved = localStorage.getItem('bot_settings');
+    if(!saved) return;
+    const cfg = JSON.parse(saved);
+    
+    if(cfg.NETWORK) document.getElementById('cfg-network').value = cfg.NETWORK;
+    if(cfg.NFT_CONTRACT_ADDRESS) document.getElementById('cfg-contract').value = cfg.NFT_CONTRACT_ADDRESS;
+    if(cfg.MINT_QUANTITY) document.getElementById('cfg-qty').value = cfg.MINT_QUANTITY;
+    if(cfg.MINT_MODE) document.getElementById('cfg-mode').value = cfg.MINT_MODE;
+    if(cfg.MINT_FUNC_NAME) document.getElementById('cfg-func').value = cfg.MINT_FUNC_NAME;
+    if(cfg.MAX_WORKERS) document.getElementById('cfg-workers').value = cfg.MAX_WORKERS;
+    if(cfg.GAS_CEILING_GWEI) document.getElementById('cfg-gas-ceil').value = cfg.GAS_CEILING_GWEI;
+    if(cfg.MAX_GAS_LIMIT) document.getElementById('cfg-gas-max').value = cfg.MAX_GAS_LIMIT;
+    if(cfg.PRE_SIGN_GAS_LIMIT) document.getElementById('cfg-presign-gas').value = cfg.PRE_SIGN_GAS_LIMIT;
+    if(cfg.RETRY_DELAY_MIN) document.getElementById('cfg-delay-min').value = cfg.RETRY_DELAY_MIN;
+    if(cfg.RETRY_DELAY_MAX) document.getElementById('cfg-delay-max').value = cfg.RETRY_DELAY_MAX;
+    if(cfg.RECIPIENT_ADDRESS) document.getElementById('cfg-recipient').value = cfg.RECIPIENT_ADDRESS;
+    if(cfg.OS_API_KEY) document.getElementById('cfg-os-api').value = cfg.OS_API_KEY;
+    
+    document.getElementById('tog-force').checked = cfg.FORCE_START === 'true';
+    document.getElementById('tog-presign').checked = cfg.PRE_SIGN_ENABLED === 'true';
+    document.getElementById('tog-flashbots').checked = cfg.FLASHBOTS_MODE === 'true';
+    document.getElementById('tog-fund').checked = cfg.AUTO_FUND_ENABLED === 'true';
+    document.getElementById('tog-transfer').checked = cfg.AUTO_TRANSFER_ENABLED === 'true';
+    document.getElementById('tog-sweep').checked = cfg.AUTO_SWEEP_ETH === 'true';
+    document.getElementById('tog-discord').checked = cfg.DISCORD_ENABLED === 'true';
+    document.getElementById('tog-verify').checked = cfg.VERIFY_CONTRACT_ENABLED === 'true';
+    document.getElementById('tog-account').checked = cfg.ACCOUNTANT_ENABLED === 'true';
+
+    // Load encrypted keys if any
+    const savedKeys = localStorage.getItem('bot_encrypted_keys');
+    if(savedKeys) {
+      encryptedKeys = JSON.parse(savedKeys);
+      document.getElementById('key-input').value = '[ENCRYPTED — Restored from memory]';
+      document.getElementById('vault-status').textContent = '✅ Encrypted keys restored from memory. Ready to launch.';
+    }
+
+    syncNetworkPill();
+  } catch(e) {}
+}
+
+// Add auto-save listeners to all inputs
+function setupAutoSave(){
+  const inputs = document.querySelectorAll('.field input, .field select, .field textarea, .toggle input');
+  inputs.forEach(el => {
+    el.addEventListener('change', saveSettings);
+    el.addEventListener('input', saveSettings);
+  });
+}
+
 initTheme();
+loadSettings();
+setupAutoSave();
 syncNetworkPill();
-document.getElementById('cfg-network')?.addEventListener('change', syncNetworkPill);
 
 connectWS();
 loadGasHistory();
