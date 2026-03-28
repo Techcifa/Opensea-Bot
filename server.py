@@ -110,6 +110,12 @@ async def serve_dashboard():
     return FileResponse(path, media_type="text/html")
 
 
+@app.get("/health")
+async def health_check():
+    """Simple endpoint for keep-alive pings."""
+    return {"status": "ok", "uptime": orchestrator.get_status().get("uptime", 0)}
+
+
 # ---------------------------------------------------------------------------
 # Bot control
 # ---------------------------------------------------------------------------
