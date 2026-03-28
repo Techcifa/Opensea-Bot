@@ -1764,7 +1764,8 @@
     // ── WEBSOCKET ──
     function connectWS() {
       if (ws && ws.readyState < 2) return;
-      ws = new WebSocket(`ws://${location.host}/ws`);
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws`);
       ws.onopen = () => { log('SYS', 'INFO', 'WebSocket connected ✓'); clearInterval(wsReconnectTimer); wsReconnectTimer = null };
       ws.onmessage = e => { try { handleMsg(JSON.parse(e.data)) } catch (err) { } };
       ws.onclose = () => {
