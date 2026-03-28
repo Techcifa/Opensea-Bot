@@ -428,9 +428,12 @@ class ExecutionUnit:
 
         if start_time > current_time and not self._cfg.force_start:
             wait_seconds = start_time - current_time
-            unlock_dt = datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-            await self._log("WARNING", f"[Time Sniper] Opens at: {unlock_dt}. Sleeping {wait_seconds:.0f}s...")
-            await self._update_worker("WAITING", f"{bal_eth:.5f}", f"Sleeping until {unlock_dt}")
+            # Standardize: Show both UTC and Local to avoid machine offset confusion
+            dt_utc = datetime.utcfromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
+            dt_loc = datetime.fromtimestamp(start_time).strftime("%H:%M:%S")
+            
+            await self._log("WARNING", f"[Time Sniper] Opens at: {dt_utc} UTC ({dt_loc} Local). Sleeping {wait_seconds:.0f}s...")
+            await self._update_worker("WAITING", f"{bal_eth:.5f}", f"Wait until {dt_utc} UTC")
 
             if self._cfg.presign_enabled and wait_seconds > 10:
                 # Sleep until 5s before mint, then pre-sign
