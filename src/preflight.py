@@ -16,7 +16,9 @@ class PreflightChecker:
         self._keys = keys
 
         rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
+        # Use the first RPC by default, but Preflight will check others if it fails
         self._w3 = AsyncWeb3(AsyncHTTPProvider(rpcs[0]))
+        
         net_info = NETWORKS.get(self._cfg.rpc_ticker, {})
         self._symbol = net_info.get("symbol", "ETH")
         self._explorer = net_info.get("explorer", "https://etherscan.io")

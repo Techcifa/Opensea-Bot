@@ -8,13 +8,15 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Network definitions — RPC list, chain ID, native token symbol, explorer
 # ---------------------------------------------------------------------------
+ankr_key = os.getenv("ANKR_API_KEY", "").strip()
+
 NETWORKS = {
     "ETH": {
         "id": 1,
         "symbol": "ETH",
         "rpc": [
             "https://eth.llamarpc.com",
-            "https://rpc.ankr.com/eth",
+            f"https://rpc.ankr.com/eth/{ankr_key}" if ankr_key else "https://rpc.ankr.com/eth",
             "https://cloudflare-eth.com",
         ],
         "explorer": "https://etherscan.io",
@@ -25,7 +27,7 @@ NETWORKS = {
         "rpc": [
             "https://mainnet.base.org",
             "https://base.llamarpc.com",
-            "https://rpc.ankr.com/base",
+            f"https://rpc.ankr.com/base/{ankr_key}" if ankr_key else "https://rpc.ankr.com/base",
         ],
         "explorer": "https://basescan.org",
     },
@@ -35,7 +37,7 @@ NETWORKS = {
         "rpc": [
             "https://mainnet.optimism.io",
             "https://optimism.llamarpc.com",
-            "https://rpc.ankr.com/optimism",
+            f"https://rpc.ankr.com/optimism/{ankr_key}" if ankr_key else "https://rpc.ankr.com/optimism",
         ],
         "explorer": "https://optimistic.etherscan.io",
     },
@@ -45,7 +47,7 @@ NETWORKS = {
         "rpc": [
             "https://arb1.arbitrum.io/rpc",
             "https://arbitrum.llamarpc.com",
-            "https://rpc.ankr.com/arbitrum",
+            f"https://rpc.ankr.com/arbitrum/{ankr_key}" if ankr_key else "https://rpc.ankr.com/arbitrum",
         ],
         "explorer": "https://arbiscan.io",
     },
@@ -55,7 +57,7 @@ NETWORKS = {
         "rpc": [
             "https://polygon-rpc.com",
             "https://polygon.llamarpc.com",
-            "https://rpc.ankr.com/polygon",
+            f"https://rpc.ankr.com/polygon/{ankr_key}" if ankr_key else "https://rpc.ankr.com/polygon",
         ],
         "explorer": "https://polygonscan.com",
     },
@@ -64,7 +66,7 @@ NETWORKS = {
         "symbol": "AVAX",
         "rpc": [
             "https://api.avax.network/ext/bc/C/rpc",
-            "https://rpc.ankr.com/avalanche",
+            f"https://rpc.ankr.com/avalanche/{ankr_key}" if ankr_key else "https://rpc.ankr.com/avalanche",
         ],
         "explorer": "https://snowtrace.io",
     },
@@ -73,7 +75,7 @@ NETWORKS = {
         "symbol": "BNB",
         "rpc": [
             "https://bsc-dataseed.binance.org",
-            "https://rpc.ankr.com/bsc",
+            f"https://rpc.ankr.com/bsc/{ankr_key}" if ankr_key else "https://rpc.ankr.com/bsc",
         ],
         "explorer": "https://bscscan.com",
     },
