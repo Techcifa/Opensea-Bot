@@ -14,14 +14,27 @@ class PreflightChecker:
     def __init__(self, keys: list[str]):
         self._cfg = ConfigurationManager()
         self._keys = keys
-
-        rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
-        # Use the first RPC by default, but Preflight will check others if it fails
-        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpcs[0]))
+        
+        # We'll initialize _w3 lazily or find a working one now
+        self._rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
+        self._w3 = AsyncWeb3(AsyncHTTPProvider(self._rpcs[0]))
         
         net_info = NETWORKS.get(self._cfg.rpc_ticker, {})
         self._symbol = net_info.get("symbol", "ETH")
         self._explorer = net_info.get("explorer", "https://etherscan.io")
+
+    async def _ensure_w3_works(self):
+        """Try available RPCs until one actually responds to a simple call."""
+        for rpc in self._rpcs:
+            temp_w3 = AsyncWeb3(AsyncHTTPProvider(rpc))
+            try:
+                # Use a lightweight call to verify authorization and connectivity
+                await asyncio.wait_for(temp_w3.eth.block_number, timeout=3)
+                self._w3 = temp_w3
+                return True
+            except Exception:
+                continue
+        return False
 
     async def _estimate_gas_cost_wei(self) -> int:
         """
@@ -60,6 +73,9 @@ class PreflightChecker:
 
     async def run(self) -> list[dict]:
         """Returns a list of check results: {label, status, detail}"""
+        # First, find a working RPC node to avoid "Forbidden" errors
+        await self._ensure_w3_works()
+        
         checks = []
         checks.append(await self._check_network())
         checks.append(await self._check_contract())
