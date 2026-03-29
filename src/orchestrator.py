@@ -59,14 +59,30 @@ class BotOrchestrator:
 
         await self._broadcast({"type": "status", "status": "STARTING",
                                 "timestamp": int(time.time())})
+        await self._broadcast({"type": "log", "level": "INFO", "worker_id": "SYS",
+                                "message": f"Initializing infrastructure for {cfg.rpc_ticker}...", "timestamp": int(time.time())})
 
         # Start infrastructure
-        rpc_health.start()
-        gas_oracle.set_broadcast_callback(self._broadcast)
-        gas_oracle.start()
+        try:
+            rpc_health.start()
+            gas_oracle.set_broadcast_callback(self._broadcast)
+            gas_oracle.start()
+            
+            # Wait a moment for RPC health check to hit first results
+            await asyncio.sleep(1)
+            rpcs = rpc_health.get_rpcs(cfg.rpc_ticker)
+            await self._broadcast({"type": "log", "level": "INFO", "worker_id": "SYS",
+                                    "message": f"RPC pool ready ({len(rpcs)} nodes).", "timestamp": int(time.time())})
+        except Exception as e:
+            await self._broadcast({"type": "log", "level": "FATAL", "worker_id": "SYS",
+                                    "message": f"Infrastructure failure: {e}", "timestamp": int(time.time())})
+            self._running = False
+            return
 
         # Auto-funder
         if cfg.fund_enabled:
+            await self._broadcast({"type": "log", "level": "INFO", "worker_id": "SYS",
+                                    "message": "Starting Auto-Funder...", "timestamp": int(time.time())})
             try:
                 funder = MassFunder()
                 await funder.check_and_fund(keys, broadcast=self._broadcast)
