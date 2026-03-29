@@ -80,6 +80,8 @@ class PreflightChecker:
         checks.append(await self._check_network())
         checks.append(await self._check_contract())
         checks.append(await self._check_rpc())
+        if self._cfg.mint_mode == "SEADROP_WL":
+            checks.append(self._check_os_api())
         wallet_checks = await self._check_wallets()
         checks.extend(wallet_checks)
         return checks
@@ -118,6 +120,11 @@ class PreflightChecker:
             return {"label": "RPC Health", "status": "ok",
                     "detail": f"{len(rpcs)} healthy node(s) available"}
         return {"label": "RPC Health", "status": "error", "detail": "No healthy RPC nodes"}
+
+    def _check_os_api(self) -> dict:
+        if self._cfg.os_api_key:
+            return {"label": "OpenSea API", "status": "ok", "detail": "API Key found ✓"}
+        return {"label": "OpenSea API", "status": "error", "detail": "Missing OS_API_KEY for SEADROP_WL mode!"}
 
     async def _check_wallets(self) -> list[dict]:
         from eth_account import Account
