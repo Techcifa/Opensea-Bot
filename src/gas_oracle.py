@@ -74,10 +74,16 @@ class GasOracle:
     async def bump_gas_params(self, original_params: dict, attempt: int = 1) -> dict:
         """Exponentially bump gas for stuck-TX resubmission."""
         factor = min(1.0 + 0.12 * attempt, self._cfg.max_gas_bump_multiplier)
-        return {
+        bumped = {
             "maxFeePerGas": int(original_params.get("maxFeePerGas", 0) * factor),
             "maxPriorityFeePerGas": int(original_params.get("maxPriorityFeePerGas", 0) * factor),
         }
+        cap_wei = int(self._cfg.max_gas_limit * 1e9) if self._cfg.max_gas_limit > 0 else 0
+        if cap_wei > 0:
+            bumped["maxFeePerGas"] = min(bumped["maxFeePerGas"], cap_wei)
+            if bumped["maxPriorityFeePerGas"] > bumped["maxFeePerGas"]:
+                bumped["maxPriorityFeePerGas"] = bumped["maxFeePerGas"]
+        return bumped
 
     # ------------------------------------------------------------------
     async def _loop(self):
@@ -119,6 +125,11 @@ class GasOracle:
 
                 # Use configurable base fee multiplier (default 1.25x) instead of hardcoded 2.0x
                 max_fee = int(latest_base * self._cfg.gas_base_multiplier) + avg_prio
+                cap_wei = int(self._cfg.max_gas_limit * 1e9) if self._cfg.max_gas_limit > 0 else 0
+                if cap_wei > 0:
+                    max_fee = min(max_fee, cap_wei)
+                    if avg_prio > max_fee:
+                        avg_prio = max_fee
 
                 self._current = {
                     "base_fee_wei": latest_base,
@@ -148,6 +159,9 @@ class GasOracle:
                 # Fallback to legacy gas price if EIP-1559 not supported or this provider fails
                 try:
                     price = await asyncio.wait_for(self._w3.eth.gas_price, timeout=4)
+                    cap_wei = int(self._cfg.max_gas_limit * 1e9) if self._cfg.max_gas_limit > 0 else 0
+                    if cap_wei > 0:
+                        price = min(price, cap_wei)
                     gwei = round(price / 1e9, 2)
                     self._current = {
                         "base_fee_wei": price,

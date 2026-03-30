@@ -152,15 +152,34 @@ class ExecutionUnit:
         required = value + gas * price
         return int(required * 1.02)
 
+    def _cap_gas_params(self, params: dict) -> dict:
+        """Clamp gas params to MAX_GAS_LIMIT (in gwei) when configured."""
+        cap_wei = int(self._cfg.max_gas_limit * 1e9) if self._cfg.max_gas_limit > 0 else 0
+        if cap_wei <= 0:
+            return params
+
+        if "maxFeePerGas" in params:
+            params["maxFeePerGas"] = min(int(params.get("maxFeePerGas", 0)), cap_wei)
+            if "maxPriorityFeePerGas" in params:
+                params["maxPriorityFeePerGas"] = min(int(params.get("maxPriorityFeePerGas", 0)), params["maxFeePerGas"])
+
+        if "gasPrice" in params:
+            params["gasPrice"] = min(int(params.get("gasPrice", 0)), cap_wei)
+
+        return params
+
     async def _get_gas_params(self) -> dict:
         """Return EIP-1559 gas params, respecting manual override."""
         if self._cfg.gas_gwei:
-            price = int(float(self._cfg.gas_gwei) * 1e9)
-            return {"gasPrice": price}
+            manual_price = int(float(self._cfg.gas_gwei) * 1e9)
+            return self._cap_gas_params({"gasPrice": manual_price})
+
         params = await gas_oracle.get_tx_params()
-        # Add 20% buffer on top of computed fee
-        params["maxFeePerGas"] = int(params["maxFeePerGas"] * 1.2)
-        return params
+        fee_buffer = max(float(self._cfg.tx_fee_buffer_multiplier), 0.1)
+        params["maxFeePerGas"] = int(params.get("maxFeePerGas", 0) * fee_buffer)
+        if "maxPriorityFeePerGas" in params:
+            params["maxPriorityFeePerGas"] = int(params.get("maxPriorityFeePerGas", 0) * fee_buffer)
+        return self._cap_gas_params(params)
 
     async def _guard_gas(self):
         """Block execution while gas is above ceiling."""
@@ -378,7 +397,7 @@ class ExecutionUnit:
             est_tx = tx.copy()
             est_tx.pop("gas", None)
             est = await self.w3.eth.estimate_gas(est_tx)
-            tx["gas"] = int(est * 1.2)
+            tx["gas"] = max(21_000, int(est * self._cfg.gas_estimate_multiplier))
         except Exception:
             tx["gas"] = 400_000
 
@@ -450,6 +469,7 @@ class ExecutionUnit:
                         gas_params["maxFeePerGas"] = int(gas_params["maxFeePerGas"] * self._cfg.presign_gas_mult)
                     else:
                         gas_params["gasPrice"] = int(gas_params.get("gasPrice", 0) * self._cfg.presign_gas_mult)
+                    gas_params = self._cap_gas_params(gas_params)
 
                     tx = await self._build_mint_tx(nft_addr_c, total_value, gas_params, nonce)
                     if tx:

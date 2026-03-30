@@ -124,6 +124,10 @@ class ConfigurationManager:
     presign_enabled: bool
     presign_gas_mult: float
     presign_gas_limit: int
+    gas_base_multiplier: float
+    priority_fee_gwei: float
+    tx_fee_buffer_multiplier: float
+    gas_estimate_multiplier: float
     flashbots_mode: bool
     use_proxies: bool
     proxies: list[str]
@@ -192,6 +196,8 @@ class ConfigurationManager:
         # Gas Strategy Optimizations
         self._safe_float("gas_base_multiplier", "GAS_BASE_FEE_MULTIPLIER", 1.25)
         self._safe_float("priority_fee_gwei", "PRIORITY_FEE_GWEI", 1.5)
+        self._safe_float("tx_fee_buffer_multiplier", "TX_FEE_BUFFER_MULTIPLIER", 1.0)
+        self._safe_float("gas_estimate_multiplier", "GAS_ESTIMATE_MULTIPLIER", 1.1)
 
         # Flashbots
         self.flashbots_mode = self._bool("FLASHBOTS_MODE")
