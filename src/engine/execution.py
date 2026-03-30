@@ -302,6 +302,12 @@ class ExecutionUnit:
                               gas_params: dict, nonce: int) -> dict | None:
         sea_addr_c = AsyncWeb3.to_checksum_address(self._cfg.sea_addr)
         multi_addr_c = AsyncWeb3.to_checksum_address(self._cfg.multi_addr)
+        fallback_gas = {
+            "DIRECT": 180_000,
+            "SEADROP": 260_000,
+            "SEADROP_WL": 300_000,
+            "PROXY": 320_000,
+        }.get(self._cfg.mint_mode, 260_000)
 
         if self._cfg.mint_mode == "DIRECT":
             target_contract = self.w3.eth.contract(
@@ -317,7 +323,7 @@ class ExecutionUnit:
                 "from": self._acct.address,
                 "value": total_value,
                 "nonce": nonce,
-                "gas": 400000,
+                "gas": fallback_gas,
                 **gas_params,
             })
         elif self._cfg.mint_mode == "SEADROP":
@@ -336,7 +342,7 @@ class ExecutionUnit:
                 "from": self._acct.address,
                 "value": total_value,
                 "nonce": nonce,
-                "gas": 400000,
+                "gas": fallback_gas,
                 **gas_params,
             })
         elif self._cfg.mint_mode == "SEADROP_WL":
@@ -374,7 +380,7 @@ class ExecutionUnit:
                 "from": self._acct.address,
                 "value": total_value,
                 "nonce": nonce,
-                "gas": 400000,
+                "gas": fallback_gas,
                 **gas_params,
             })
         else:
@@ -388,18 +394,27 @@ class ExecutionUnit:
                 "from": self._acct.address,
                 "value": total_value,
                 "nonce": nonce,
-                "gas": 400000,
+                "gas": fallback_gas,
                 **gas_params,
             })
 
         # Gas estimation
-        try:
-            est_tx = tx.copy()
-            est_tx.pop("gas", None)
-            est = await self.w3.eth.estimate_gas(est_tx)
-            tx["gas"] = max(21_000, int(est * self._cfg.gas_estimate_multiplier))
-        except Exception:
-            tx["gas"] = 400_000
+        est_error = None
+        for attempt in range(2):
+            try:
+                est_tx = tx.copy()
+                est_tx.pop("gas", None)
+                est = await self.w3.eth.estimate_gas(est_tx)
+                tx["gas"] = max(21_000, int(est * self._cfg.gas_estimate_multiplier))
+                break
+            except Exception as e:
+                est_error = e
+                if attempt == 0:
+                    await self._rotate_rpc()
+        else:
+            tx["gas"] = fallback_gas
+            if est_error:
+                await self._log("WARNING", f"Gas estimate failed; using fallback {fallback_gas}: {est_error}")
 
         return tx
 
