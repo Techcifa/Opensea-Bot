@@ -109,12 +109,16 @@ class GasOracle:
                     latest_base = await asyncio.wait_for(self._w3.eth.gas_price, timeout=4)
 
                 if prio_fees:
-                    avg_prio = sum(row[0] for row in prio_fees) // len(prio_fees)
+                    # User priority fee override or network average
+                    if self._cfg.priority_fee_gwei > 0:
+                        avg_prio = int(self._cfg.priority_fee_gwei * 1e9)
+                    else:
+                        avg_prio = sum(row[0] for row in prio_fees) // len(prio_fees)
                 else:
-                    avg_prio = int(1e9)  # 1 Gwei default priority tip
+                    avg_prio = int(self._cfg.priority_fee_gwei * 1e9)
 
-                # maxFeePerGas = 2x base fee + priority tip (EIP-1559 best practice)
-                max_fee = int(latest_base * 2) + avg_prio
+                # Use configurable base fee multiplier (default 1.25x) instead of hardcoded 2.0x
+                max_fee = int(latest_base * self._cfg.gas_base_multiplier) + avg_prio
 
                 self._current = {
                     "base_fee_wei": latest_base,

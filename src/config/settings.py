@@ -189,6 +189,10 @@ class ConfigurationManager:
         self._safe_float("presign_gas_mult", "PRE_SIGN_GAS_MULTIPLIER", 2.0)
         self._safe_int("presign_gas_limit", "PRE_SIGN_GAS_LIMIT", 300_000)
 
+        # Gas Strategy Optimizations
+        self._safe_float("gas_base_multiplier", "GAS_BASE_FEE_MULTIPLIER", 1.25)
+        self._safe_float("priority_fee_gwei", "PRIORITY_FEE_GWEI", 1.5)
+
         # Flashbots
         self.flashbots_mode = self._bool("FLASHBOTS_MODE")
 

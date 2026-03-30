@@ -60,8 +60,15 @@ class PreflightChecker:
             base_fees = history.get("baseFeePerGas", [])
             prio_fees = history.get("reward", [])
             latest_base = base_fees[-1] if base_fees else await self._w3.eth.gas_price
-            avg_prio = (sum(row[0] for row in prio_fees) // len(prio_fees)) if prio_fees else int(1e9)
-            max_fee = int(latest_base * 2) + avg_prio
+            
+            # Use configurable priority fee or network average
+            if self._cfg.priority_fee_gwei > 0:
+                avg_prio = int(self._cfg.priority_fee_gwei * 1e9)
+            else:
+                avg_prio = (sum(row[0] for row in prio_fees) // len(prio_fees)) if prio_fees else int(1e9)
+            
+            # Use same multiplier as oracle for consistency
+            max_fee = int(latest_base * self._cfg.gas_base_multiplier) + avg_prio
             max_fee = int(max_fee * mult)
             return int(gas_limit * max_fee)
         except Exception:
