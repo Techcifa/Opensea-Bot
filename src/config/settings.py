@@ -128,6 +128,7 @@ class ConfigurationManager:
     priority_fee_gwei: float
     tx_fee_buffer_multiplier: float
     gas_estimate_multiplier: float
+    direct_fallback_gas_limit: int
     flashbots_mode: bool
     use_proxies: bool
     proxies: list[str]
@@ -198,6 +199,7 @@ class ConfigurationManager:
         self._safe_float("priority_fee_gwei", "PRIORITY_FEE_GWEI", 1.5)
         self._safe_float("tx_fee_buffer_multiplier", "TX_FEE_BUFFER_MULTIPLIER", 1.0)
         self._safe_float("gas_estimate_multiplier", "GAS_ESTIMATE_MULTIPLIER", 1.1)
+        self._safe_int("direct_fallback_gas_limit", "DIRECT_FALLBACK_GAS_LIMIT", 140_000)
 
         # Flashbots
         self.flashbots_mode = self._bool("FLASHBOTS_MODE")

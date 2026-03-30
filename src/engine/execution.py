@@ -303,7 +303,7 @@ class ExecutionUnit:
         sea_addr_c = AsyncWeb3.to_checksum_address(self._cfg.sea_addr)
         multi_addr_c = AsyncWeb3.to_checksum_address(self._cfg.multi_addr)
         fallback_gas = {
-            "DIRECT": 180_000,
+            "DIRECT": self._cfg.direct_fallback_gas_limit,
             "SEADROP": 260_000,
             "SEADROP_WL": 300_000,
             "PROXY": 320_000,
