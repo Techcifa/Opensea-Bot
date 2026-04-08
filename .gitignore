@@ -1,19 +1,35 @@
-# Environments
+# Runtime generated files (contain sensitive data)
+session.json
+history.csv
+server.pid
+server.log
+server.err
+proxies.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
 venv/
 env/
 .env
 
-# Python caches
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Application specific
-history.csv
-app.log
-proxies.txt
-
-# OS generated files
+# OS
 .DS_Store
 Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+*.orig

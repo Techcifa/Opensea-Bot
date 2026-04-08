@@ -154,33 +154,34 @@ class PreflightChecker:
         gas_estimate_wei = await self._estimate_gas_cost_wei()
         min_required_wei = mint_price_wei * self._cfg.qty + gas_estimate_wei
 
-        for i, pk in enumerate(self._keys):
+        # FIX M-05: Check all wallets concurrently instead of sequentially.
+        # With 50 wallets and 300ms RPC latency, sequential = 15 s; concurrent = ~0.3 s.
+        async def _check_one(i: int, pk: str) -> dict:
             wid = i + 1
             try:
-                acct = Account.from_key(pk)
+                acct    = Account.from_key(pk)
                 bal_wei = await self._w3.eth.get_balance(acct.address)
                 bal_eth = bal_wei / 1e18
                 min_eth = min_required_wei / 1e18
-
-                if bal_wei >= min_required_wei:
-                    status = "ok"
-                    detail = f"Balance: {bal_eth:.5f} {self._symbol} (need ≥ {min_eth:.5f})"
-                else:
-                    status = "warn"
-                    detail = f"Low balance: {bal_eth:.5f} {self._symbol} (need ≥ {min_eth:.5f})"
-
-                results.append({
-                    "label": f"Wallet #{wid}",
-                    "status": status,
-                    "detail": detail,
-                    "address": acct.address,
+                status  = "ok" if bal_wei >= min_required_wei else "warn"
+                detail  = (
+                    f"Balance: {bal_eth:.5f} {self._symbol} (need ≥ {min_eth:.5f})"
+                    if status == "ok"
+                    else f"Low balance: {bal_eth:.5f} {self._symbol} (need ≥ {min_eth:.5f})"
+                )
+                return {
+                    "label":    f"Wallet #{wid}",
+                    "status":   status,
+                    "detail":   detail,
+                    "address":  acct.address,
                     "explorer": f"{self._explorer}/address/{acct.address}",
-                })
-            except Exception as e:
-                results.append({
-                    "label": f"Wallet #{wid}",
+                }
+            except Exception as exc:
+                return {
+                    "label":  f"Wallet #{wid}",
                     "status": "error",
-                    "detail": f"Invalid key: {str(e)[:40]}",
-                })
+                    "detail": f"Invalid key: {str(exc)[:40]}",
+                }
 
-        return results
+        results = await asyncio.gather(*[_check_one(i, pk) for i, pk in enumerate(self._keys)])
+        return list(results)

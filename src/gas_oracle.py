@@ -1,17 +1,20 @@
 """
 GasOracle — EIP-1559 aware gas price oracle.
 
-Uses eth_feeHistory to compute optimal maxFeePerGas + maxPriorityFeePerGas.
-Maintains a 30-minute rolling history for the dashboard chart.
-Enforces GAS_CEILING_GWEI — pauses worker execution if exceeded.
+FIXES:
+  C-02  time.perf_counter() → time.time() so history timestamps are real Unix epoch
+  H-06  Dynamic config read so ceiling/multipliers pick up runtime overrides
 """
 
 import asyncio
 import time
+import logging
 from collections import deque
 from web3 import AsyncWeb3, AsyncHTTPProvider
 
 from src.config.settings import ConfigurationManager, NETWORKS
+
+log = logging.getLogger(__name__)
 
 
 class GasOracle:
@@ -27,14 +30,21 @@ class GasOracle:
         if self._initialized:
             return
         self._initialized = True
-        self._cfg = ConfigurationManager()
         self._current: dict = {}
-        # rolling 30-min history: [(timestamp, gwei_value), ...]
-        self._history: deque = deque(maxlen=360)  # 30min @ 5s interval
+        # rolling 30-min history: [(unix_timestamp_int, gwei_value), ...]
+        self._history: deque = deque(maxlen=360)   # 30 min @ 5-s intervals
         self._task: asyncio.Task | None = None
-        self._broadcast_cb = None  # set by orchestrator
+        self._broadcast_cb = None                  # set by orchestrator
         self._w3: AsyncWeb3 | None = None
 
+    # ------------------------------------------------------------------
+    # H-06: Always read fresh config so runtime overrides take effect
+    # ------------------------------------------------------------------
+    @property
+    def _cfg(self) -> ConfigurationManager:
+        return ConfigurationManager()
+
+    # ------------------------------------------------------------------
     def set_broadcast_callback(self, cb):
         """Register a coroutine callback to broadcast gas updates."""
         self._broadcast_cb = cb
@@ -46,6 +56,7 @@ class GasOracle:
     def stop(self):
         if self._task:
             self._task.cancel()
+            self._task = None
 
     def get_current(self) -> dict:
         return self._current.copy()
@@ -54,6 +65,7 @@ class GasOracle:
         return list(self._history)
 
     def is_ceiling_exceeded(self) -> bool:
+        """FIX H-06: always reads current cfg so overrides are respected."""
         gwei = self._current.get("max_fee_gwei", 0)
         return gwei > self._cfg.gas_ceiling_gwei
 
@@ -61,24 +73,25 @@ class GasOracle:
         """Return EIP-1559 gas params for building a transaction."""
         if self._current:
             return {
-                "maxFeePerGas": self._current.get("max_fee_wei", 0),
+                "maxFeePerGas":         self._current.get("max_fee_wei", 0),
                 "maxPriorityFeePerGas": self._current.get("priority_fee_wei", 0),
             }
         # Fallback: fetch right now
         await self._fetch()
         return {
-            "maxFeePerGas": self._current.get("max_fee_wei", 0),
+            "maxFeePerGas":         self._current.get("max_fee_wei", 0),
             "maxPriorityFeePerGas": self._current.get("priority_fee_wei", 0),
         }
 
     async def bump_gas_params(self, original_params: dict, attempt: int = 1) -> dict:
         """Exponentially bump gas for stuck-TX resubmission."""
-        factor = min(1.0 + 0.12 * attempt, self._cfg.max_gas_bump_multiplier)
+        cfg = self._cfg
+        factor = min(1.0 + 0.12 * attempt, cfg.max_gas_bump_multiplier)
         bumped = {
-            "maxFeePerGas": int(original_params.get("maxFeePerGas", 0) * factor),
+            "maxFeePerGas":         int(original_params.get("maxFeePerGas", 0) * factor),
             "maxPriorityFeePerGas": int(original_params.get("maxPriorityFeePerGas", 0) * factor),
         }
-        cap_wei = int(self._cfg.max_gas_limit * 1e9) if self._cfg.max_gas_limit > 0 else 0
+        cap_wei = int(cfg.max_gas_limit * 1e9) if cfg.max_gas_limit > 0 else 0
         if cap_wei > 0:
             bumped["maxFeePerGas"] = min(bumped["maxFeePerGas"], cap_wei)
             if bumped["maxPriorityFeePerGas"] > bumped["maxFeePerGas"]:
@@ -92,92 +105,84 @@ class GasOracle:
                 await self._fetch()
             except asyncio.CancelledError:
                 return
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("GasOracle fetch error: %s", exc)
             await asyncio.sleep(5)
 
     async def _fetch(self):
         from src.utils.rpc_health import rpc_health
-        rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
-        
-        # Try each healthy RPC until one works
+        cfg = self._cfg           # FIX H-06: fresh each call
+        rpcs = rpc_health.get_rpcs(cfg.rpc_ticker)
+
         for url in rpcs:
             self._w3 = AsyncWeb3(AsyncHTTPProvider(url))
             try:
-                # EIP-1559 fee history — last 5 blocks, 25th / 75th percentile priority fees
-                history = await asyncio.wait_for(self._w3.eth.fee_history(5, "latest", [25, 75]), timeout=4)
+                history = await asyncio.wait_for(
+                    self._w3.eth.fee_history(5, "latest", [25, 75]), timeout=4
+                )
                 base_fees = history.get("baseFeePerGas", [])
                 prio_fees = history.get("reward", [])
 
-                if base_fees:
-                    latest_base = base_fees[-1]
-                else:
-                    latest_base = await asyncio.wait_for(self._w3.eth.gas_price, timeout=4)
+                latest_base = base_fees[-1] if base_fees else await asyncio.wait_for(
+                    self._w3.eth.gas_price, timeout=4
+                )
 
                 if prio_fees:
-                    # User priority fee override or network average
-                    if self._cfg.priority_fee_gwei > 0:
-                        avg_prio = int(self._cfg.priority_fee_gwei * 1e9)
-                    else:
-                        avg_prio = sum(row[0] for row in prio_fees) // len(prio_fees)
+                    avg_prio = (
+                        int(cfg.priority_fee_gwei * 1e9)
+                        if cfg.priority_fee_gwei > 0
+                        else sum(row[0] for row in prio_fees) // len(prio_fees)
+                    )
                 else:
-                    avg_prio = int(self._cfg.priority_fee_gwei * 1e9)
+                    avg_prio = int(cfg.priority_fee_gwei * 1e9)
 
-                # Use configurable base fee multiplier (default 1.25x) instead of hardcoded 2.0x
-                max_fee = int(latest_base * self._cfg.gas_base_multiplier) + avg_prio
-                cap_wei = int(self._cfg.max_gas_limit * 1e9) if self._cfg.max_gas_limit > 0 else 0
+                max_fee = int(latest_base * cfg.gas_base_multiplier) + avg_prio
+                cap_wei = int(cfg.max_gas_limit * 1e9) if cfg.max_gas_limit > 0 else 0
                 if cap_wei > 0:
                     max_fee = min(max_fee, cap_wei)
                     if avg_prio > max_fee:
                         avg_prio = max_fee
 
                 self._current = {
-                    "base_fee_wei": latest_base,
+                    "base_fee_wei":  latest_base,
                     "priority_fee_wei": avg_prio,
-                    "max_fee_wei": max_fee,
+                    "max_fee_wei":   max_fee,
                     "base_fee_gwei": round(latest_base / 1e9, 2),
-                    "max_fee_gwei": round(max_fee / 1e9, 2),
+                    "max_fee_gwei":  round(max_fee / 1e9, 2),
                 }
 
-                ts = int(time.perf_counter())
+                # FIX C-02: use time.time() (Unix epoch) not time.perf_counter()
+                ts = int(time.time())
                 self._history.append((ts, self._current["max_fee_gwei"]))
 
                 if self._broadcast_cb:
                     try:
-                        await self._broadcast_cb({
-                            "type": "gas_update",
-                            "data": self._current,
-                            "ts": ts,
-                        })
+                        await self._broadcast_cb({"type": "gas_update", "data": self._current, "ts": ts})
                     except Exception:
                         pass
-                
-                # If we got here, success!
-                return
+
+                return   # success
 
             except Exception:
-                # Fallback to legacy gas price if EIP-1559 not supported or this provider fails
+                # Fallback to legacy gas price
                 try:
                     price = await asyncio.wait_for(self._w3.eth.gas_price, timeout=4)
-                    cap_wei = int(self._cfg.max_gas_limit * 1e9) if self._cfg.max_gas_limit > 0 else 0
+                    cap_wei = int(cfg.max_gas_limit * 1e9) if cfg.max_gas_limit > 0 else 0
                     if cap_wei > 0:
                         price = min(price, cap_wei)
                     gwei = round(price / 1e9, 2)
                     self._current = {
-                        "base_fee_wei": price,
-                        "priority_fee_wei": 0,
-                        "max_fee_wei": price,
-                        "base_fee_gwei": gwei,
-                        "max_fee_gwei": gwei,
+                        "base_fee_wei": price, "priority_fee_wei": 0,
+                        "max_fee_wei": price, "base_fee_gwei": gwei, "max_fee_gwei": gwei,
                     }
-                    ts = int(time.perf_counter())
+                    # FIX C-02: Unix timestamp
+                    ts = int(time.time())
                     self._history.append((ts, gwei))
-                    
                     if self._broadcast_cb:
                         await self._broadcast_cb({"type": "gas_update", "data": self._current, "ts": ts})
-                    return # Success
+                    return
                 except Exception:
-                    continue # Try next RPC
+                    continue   # try next RPC
 
 
 # Singleton

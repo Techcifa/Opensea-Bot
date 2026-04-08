@@ -2,10 +2,15 @@
 ContractVerifier — checks that a smart contract is verified on Etherscan/Basescan
 before allowing any transactions (anti-honeypot guard).
 
-RuntimeDiagnostics is intentionally NOT included here.
+FIX H-02: Changed all exception paths from "fail open" (return True) to
+           "fail closed" (return False). Unknown state = unsafe.
 """
 
+import asyncio
+import logging
 import aiohttp
+
+log = logging.getLogger(__name__)
 
 
 class ContractVerifier:
@@ -26,29 +31,39 @@ class ContractVerifier:
 
     async def is_verified(self, contract_address: str) -> bool:
         if not self.base_url:
-            return True  # Unsupported network — skip check
+            log.info("ContractVerifier: unsupported network %s — skipping check", self.network)
+            return True   # genuinely unsupported network, not a failure
+
         if not self.api_key:
-            return True  # No API key — skip check
+            log.warning("ContractVerifier: no EXPLORER_API_KEY — skipping guard (set key to enable)")
+            return True   # operator chose to skip, not a failure
 
         params = {
-            "module": "contract",
-            "action": "getabi",
+            "module":  "contract",
+            "action":  "getabi",
             "address": contract_address,
-            "apikey": self.api_key,
+            "apikey":  self.api_key,
         }
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(self.base_url, params=params) as resp:
+                async with session.get(
+                    self.base_url, params=params,
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as resp:
                     data = await resp.json()
                     if data.get("status") == "1":
                         return True
                     result_msg = str(data.get("result", "")).lower()
                     if "not verified" in result_msg:
+                        log.warning("ContractVerifier: %s is NOT verified on %s", contract_address, self.network)
                         return False
-                    return True  # Unknown error — allow, but log
-        except Exception:
-            return True  # Network error — fail open
+                    # API returned unexpected shape — treat as unsafe
+                    log.warning("ContractVerifier: unexpected API response for %s: %s", contract_address, data)
+                    return False    # FIX H-02: was return True (fail-open)
+        except Exception as exc:
+            # FIX H-02: Network/API error → fail CLOSED (was fail open)
+            log.error("ContractVerifier: network error checking %s: %s — refusing to proceed", contract_address, exc)
+            return False
 
     async def check_guard(self, contract_address: str) -> bool:
-        is_safe = await self.is_verified(contract_address)
-        return is_safe
+        return await self.is_verified(contract_address)

@@ -111,6 +111,8 @@ class ConfigurationManager:
     multi_addr: str
     target_nft: str
     qty: int
+    mint_price_eth: float | None   # manual price override — skips SeaDrop lookup
+    skip_simulation: bool          # bypass eth_call sim (use for mints not yet open)
     max_threads: int
     delay_range: tuple[float, float]
     gas_gwei: str | None
@@ -169,6 +171,13 @@ class ConfigurationManager:
         # Target
         self.target_nft = os.getenv("NFT_CONTRACT_ADDRESS", "")
         self.qty = int(os.getenv("MINT_QUANTITY", 1))
+
+        # Manual price override (skips SeaDrop getPublicDrop lookup)
+        raw_price = os.getenv("MINT_PRICE_ETH", "").strip()
+        self.mint_price_eth = float(raw_price) if raw_price else None
+
+        # Skip TX simulation (eth_call) — useful when mint hasn't opened yet
+        self.skip_simulation = self._bool("SKIP_SIMULATION")
 
         # Performance
         self.max_threads = int(os.getenv("MAX_WORKERS", 5))

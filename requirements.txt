@@ -1,9 +1,24 @@
-fastapi
-uvicorn[standard]
+# Core web framework
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+
+# Blockchain
 web3==7.12.0
 eth-account>=0.8.0
-python-dotenv
-aiohttp
-requests
-packaging
-websockets
+
+# HTTP / async
+aiohttp==3.11.18
+websockets==14.2
+
+# Config
+python-dotenv==1.0.1
+
+# Security
+cryptography==44.0.2
+
+# Rate limiting
+slowapi==0.1.9
+
+# Utilities
+requests==2.32.3
+packaging==24.2
