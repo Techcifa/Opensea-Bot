@@ -42,18 +42,12 @@ def _validate_master_key(raw_pk: str) -> tuple[bool, str]:
 class MassFunder:
     def __init__(self):
         self._cfg = ConfigurationManager()
-        rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
-
-        # FIX M-04: guard against empty RPC list
-        if not rpcs:
-            rpcs = list(NETWORKS.get(self._cfg.rpc_ticker, {}).get("rpc", []))
-        if not rpcs:
-            raise RuntimeError("MassFunder: no RPC endpoints available")
-
+        self._rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
         net_info = NETWORKS.get(self._cfg.rpc_ticker, {})
-        self._w3 = AsyncWeb3(AsyncHTTPProvider(rpcs[0]))
         self._symbol = net_info.get("symbol", "ETH")
-        self._master = None
+        # _w3 is initialised lazily in _get_w3() to allow RPC cycling
+        self._w3 = AsyncWeb3(AsyncHTTPProvider(self._rpcs[0]))
+        self._active_rpc_index = 0
 
         # FIX H-04: validate master key at construction, not at first use
         if self._cfg.fund_enabled:
@@ -67,6 +61,23 @@ class MassFunder:
                 self._master = Account.from_key(key)
                 log.info("[Funder] Master wallet: %s...%s", self._master.address[:8], self._master.address[-4:])
 
+    async def _get_w3(self) -> AsyncWeb3:
+        """Return a responsive Web3 instance, rotating on failure."""
+        for i, url in enumerate(self._rpcs):
+            try:
+                if url.startswith("wss://") or url.startswith("ws://"):
+                    w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(url))
+                else:
+                    w3 = AsyncWeb3(AsyncHTTPProvider(url))
+                await asyncio.wait_for(w3.eth.block_number, timeout=4)
+                self._active_rpc_index = i
+                self._w3 = w3
+                return w3
+            except Exception:
+                continue
+        # Fallback: return whatever we had — will fail loudly
+        return self._w3
+
     async def check_and_fund(self, worker_pks: list[str], broadcast=None) -> list[str]:
         """
         Top up any worker wallet whose ETH balance is below cfg.min_worker_balance.
@@ -77,18 +88,20 @@ class MassFunder:
             return ["[Funder] Auto-Fund disabled or Master PK invalid."]
 
         logs = []
-        master_nonce = await self._w3.eth.get_transaction_count(self._master.address, "pending")
-        chain_id     = await self._w3.eth.chain_id
+        # Always pick a live RPC before starting funding
+        w3 = await self._get_w3()
+        master_nonce = await w3.eth.get_transaction_count(self._master.address)
+        chain_id = await w3.eth.chain_id
 
         # Get EIP-1559 gas if possible, fallback to legacy
         try:
-            fee_history = await self._w3.eth.fee_history(1, "latest", [50])
-            base_fee    = fee_history["baseFeePerGas"][-1]
-            priority    = fee_history["reward"][0][0] if fee_history.get("reward") else int(1e9)
-            gas_price   = int(base_fee * 1.5) + priority
-            gas_params  = {"maxFeePerGas": gas_price, "maxPriorityFeePerGas": priority, "type": 2}
+            fee_history = await w3.eth.fee_history(1, "latest", [50])
+            base_fee = fee_history["baseFeePerGas"][-1]
+            priority = fee_history["reward"][0][0] if fee_history.get("reward") else int(1e9)
+            gas_price = int(base_fee * 1.5) + priority
+            gas_params = {"maxFeePerGas": gas_price, "maxPriorityFeePerGas": priority, "type": 2}
         except Exception:
-            gas_price  = int((await self._w3.eth.gas_price) * 1.1)
+            gas_price = int((await w3.eth.gas_price) * 1.1)
             gas_params = {"gasPrice": gas_price}
 
         for i, pk in enumerate(worker_pks):
@@ -103,6 +116,13 @@ class MassFunder:
                 if broadcast:
                     await broadcast({"type": "log", "level": "ERROR", "worker_id": "SYS", "message": err_msg})
                 continue
+
+            try:
+                bal_wei = await w3.eth.get_balance(worker.address)
+            except Exception:
+                # RPC went down mid-run — rotate and retry
+                w3 = await self._get_w3()
+                bal_wei = await w3.eth.get_balance(worker.address)
 
             bal_eth = bal_wei / 1e18
             msg = f"[Funder] Worker #{wid} — Bal: {bal_eth:.5f} {self._symbol}"
@@ -121,9 +141,9 @@ class MassFunder:
                     **gas_params,
                 }
                 try:
-                    signed   = self._master.sign_transaction(tx)
-                    tx_hash  = await self._w3.eth.send_raw_transaction(signed.raw_transaction)
-                    ok_msg   = f"[Funder] Funded Worker #{wid} → {self._cfg.funding_amount} {self._symbol} | TX: {tx_hash.hex()[:12]}..."
+                    signed = self._master.sign_transaction(tx)
+                    tx_hash = await w3.eth.send_raw_transaction(signed.raw_transaction)
+                    ok_msg = f"[Funder] Funded Worker #{wid} → {self._cfg.funding_amount} {self._symbol} | TX: {tx_hash.hex()[:12]}..."
                     logs.append(ok_msg)
                     if broadcast:
                         await broadcast({"type": "log", "level": "SUCCESS", "worker_id": "SYS", "message": ok_msg})
@@ -135,5 +155,7 @@ class MassFunder:
                     logs.append(err_msg)
                     if broadcast:
                         await broadcast({"type": "log", "level": "ERROR", "worker_id": "SYS", "message": err_msg})
+                    # Rotate RPC before next wallet attempt
+                    w3 = await self._get_w3()
 
         return logs

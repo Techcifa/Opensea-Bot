@@ -3,80 +3,47 @@ PreflightChecker — validates config and wallet readiness before starting.
 """
 
 import asyncio
-import os
+import time
+from eth_account import Account
 from web3 import AsyncWeb3, AsyncHTTPProvider
 
 from src.config.settings import ConfigurationManager, NETWORKS, ContractSpecs
 from src.utils.rpc_health import rpc_health
+from src.utils.revert_decoder import decode_revert_error
+from src.engine.seadrop_wl import SeaDropWlService
 
 
 class PreflightChecker:
     def __init__(self, keys: list[str]):
         self._cfg = ConfigurationManager()
         self._keys = keys
-        
-        # We'll initialize _w3 lazily or find a working one now
-        self._rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
-        self._w3 = AsyncWeb3(AsyncHTTPProvider(self._rpcs[0]))
-        
+
+        rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
+        # Will be set in _pick_rpc(); default to first as fallback
+        self._rpcs = rpcs
+        if rpcs and (rpcs[0].startswith("wss://") or rpcs[0].startswith("ws://")):
+            self._w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(rpcs[0]))
+        else:
+            self._w3 = AsyncWeb3(AsyncHTTPProvider(rpcs[0] if rpcs else "http://localhost:8545"))
         net_info = NETWORKS.get(self._cfg.rpc_ticker, {})
         self._symbol = net_info.get("symbol", "ETH")
         self._explorer = net_info.get("explorer", "https://etherscan.io")
 
-    async def _ensure_w3_works(self):
-        """Try available RPCs until one actually responds to a simple call."""
-        for rpc in self._rpcs:
-            temp_w3 = AsyncWeb3(AsyncHTTPProvider(rpc))
+    async def _pick_rpc(self):
+        """Try each RPC until one responds, then use it for all checks."""
+        for url in self._rpcs:
             try:
-                # Use a lightweight call to verify authorization and connectivity
-                await asyncio.wait_for(temp_w3.eth.block_number, timeout=3)
-                self._w3 = temp_w3
+                if url.startswith("wss://") or url.startswith("ws://"):
+                    w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(url))
+                else:
+                    w3 = AsyncWeb3(AsyncHTTPProvider(url))
+                await asyncio.wait_for(w3.eth.block_number, timeout=5)
+                self._w3 = w3
                 return True
             except Exception:
                 continue
+                
         return False
-
-    async def _estimate_gas_cost_wei(self) -> int:
-        """
-        Estimate a worst-case gas cost in wei for preflight balance checks.
-
-        Uses EIP-1559 feeHistory when available; falls back to legacy gas_price.
-        Configurable via env:
-          - PREFLIGHT_GAS_LIMIT (default 300000)
-          - PREFLIGHT_GAS_MULTIPLIER (default 1.2)
-        """
-        try:
-            gas_limit = int(float(os.getenv("PREFLIGHT_GAS_LIMIT", "300000")))
-        except Exception:
-            gas_limit = 300_000
-
-        try:
-            mult = float(os.getenv("PREFLIGHT_GAS_MULTIPLIER", "1.2"))
-        except Exception:
-            mult = 1.2
-
-        try:
-            history = await asyncio.wait_for(self._w3.eth.fee_history(5, "latest", [25, 75]), timeout=5)
-            base_fees = history.get("baseFeePerGas", [])
-            prio_fees = history.get("reward", [])
-            latest_base = base_fees[-1] if base_fees else await self._w3.eth.gas_price
-            
-            # Use configurable priority fee or network average
-            if self._cfg.priority_fee_gwei > 0:
-                avg_prio = int(self._cfg.priority_fee_gwei * 1e9)
-            else:
-                avg_prio = (sum(row[0] for row in prio_fees) // len(prio_fees)) if prio_fees else int(1e9)
-            
-            # Use same multiplier as oracle for consistency
-            max_fee = int(latest_base * self._cfg.gas_base_multiplier) + avg_prio
-            max_fee = int(max_fee * mult)
-            return int(gas_limit * max_fee)
-        except Exception:
-            try:
-                gas_price = await asyncio.wait_for(self._w3.eth.gas_price, timeout=5)
-                return int(gas_limit * int(gas_price * mult))
-            except Exception:
-                return 0
 
     async def run(self) -> list[dict]:
         """Returns a list of check results: {label, status, detail}"""
@@ -84,13 +51,18 @@ class PreflightChecker:
         await self._ensure_w3_works()
         
         checks = []
+        if not await self._pick_rpc():
+            return [{"label": "RPC Connection", "status": "error", "detail": "ALL available RPC nodes failed to respond or returned 503/429 errors. Check your connection or API keys."}]
         checks.append(await self._check_network())
         checks.append(await self._check_contract())
+        checks.append(await self._check_drop_state())
         checks.append(await self._check_rpc())
         if self._cfg.mint_mode == "SEADROP_WL":
             checks.append(self._check_os_api())
         wallet_checks = await self._check_wallets()
         checks.extend(wallet_checks)
+        simulation_checks = await self._simulate_wallets()
+        checks.extend(simulation_checks)
         return checks
 
     async def _check_network(self) -> dict:
@@ -121,6 +93,38 @@ class PreflightChecker:
         except Exception as e:
             return {"label": "NFT Contract", "status": "error", "detail": str(e)}
 
+    async def _check_drop_state(self) -> dict:
+        if self._cfg.mint_mode not in ("SEADROP", "SEADROP_WL"):
+            return {"label": "Drop State", "status": "warn",
+                    "detail": "Direct/proxy mode: sale state must be validated by simulation."}
+        try:
+            nft_addr = AsyncWeb3.to_checksum_address(self._cfg.target_nft)
+            sea_contract = self._w3.eth.contract(
+                address=AsyncWeb3.to_checksum_address(self._cfg.sea_addr),
+                abi=ContractSpecs.SEA_ABI,
+            )
+            drop_data = await asyncio.wait_for(
+                sea_contract.functions.getPublicDrop(nft_addr).call(),
+                timeout=8,
+            )
+            mint_price_wei = int(drop_data[0])
+            start_time = int(drop_data[1])
+            end_time = int(drop_data[2])
+            max_per_wallet = int(drop_data[3])
+            now = int(time.time())
+
+            if end_time and now > end_time:
+                return {"label": "Drop State", "status": "error",
+                        "detail": f"Public drop ended at {end_time}."}
+            if start_time and now < start_time and not self._cfg.force_start:
+                return {"label": "Drop State", "status": "warn",
+                        "detail": f"Public drop starts at {start_time}; bot will wait."}
+            return {"label": "Drop State", "status": "ok",
+                    "detail": f"price={mint_price_wei / 1e18:.6f} {self._symbol}, max/wallet={max_per_wallet}"}
+        except Exception as e:
+            return {"label": "Drop State", "status": "warn",
+                    "detail": f"Could not read SeaDrop public state: {str(e)[:120]}"}
+
     async def _check_rpc(self) -> dict:
         rpcs = rpc_health.get_rpcs(self._cfg.rpc_ticker)
         if rpcs:
@@ -134,7 +138,6 @@ class PreflightChecker:
         return {"label": "OpenSea API", "status": "error", "detail": "Missing OS_API_KEY for SEADROP_WL mode!"}
 
     async def _check_wallets(self) -> list[dict]:
-        from eth_account import Account
         results = []
 
         # Estimate mint cost
@@ -149,9 +152,14 @@ class PreflightChecker:
             mint_price_wei = int(drop_data[0])
         except Exception:
             mint_price_wei = 0
-
-        # Gas estimate (dynamic; configurable)
-        gas_estimate_wei = await self._estimate_gas_cost_wei()
+        # Fetch actual network gas price (tighter 150k gas limit)
+        try:
+            current_gas_price = await self._w3.eth.gas_price
+        except Exception:
+            current_gas_price = int(10e9)  # 10 gwei fallback
+            
+        gas_limit = 150_000
+        gas_estimate_wei = gas_limit * current_gas_price
         min_required_wei = mint_price_wei * self._cfg.qty + gas_estimate_wei
 
         # FIX M-05: Check all wallets concurrently instead of sequentially.
@@ -183,5 +191,96 @@ class PreflightChecker:
                     "detail": f"Invalid key: {str(exc)[:40]}",
                 }
 
-        results = await asyncio.gather(*[_check_one(i, pk) for i, pk in enumerate(self._keys)])
-        return list(results)
+        return results
+
+    async def _simulate_wallets(self) -> list[dict]:
+        results = []
+        for i, pk in enumerate(self._keys):
+            wid = i + 1
+            try:
+                acct = Account.from_key(pk)
+                tx = await self._build_sim_tx(acct.address)
+                await asyncio.wait_for(self._w3.eth.call(tx), timeout=12)
+
+                try:
+                    gas_estimate = await asyncio.wait_for(self._w3.eth.estimate_gas(tx), timeout=12)
+                    detail = f"Simulation passed. Estimated gas: {gas_estimate:,}"
+                except Exception as e:
+                    detail = f"Simulation passed, gas estimate unavailable: {str(e)[:80]}"
+
+                results.append({
+                    "label": f"Simulation #{wid}",
+                    "status": "ok",
+                    "detail": detail,
+                    "address": acct.address,
+                    "explorer": f"{self._explorer}/address/{acct.address}",
+                })
+            except Exception as e:
+                results.append({
+                    "label": f"Simulation #{wid}",
+                    "status": "error",
+                    "detail": decode_revert_error(e)[:180],
+                })
+        return results
+
+    async def _build_sim_tx(self, sender: str) -> dict:
+        nft_addr = AsyncWeb3.to_checksum_address(self._cfg.target_nft)
+        sea_addr = AsyncWeb3.to_checksum_address(self._cfg.sea_addr)
+        multi_addr = AsyncWeb3.to_checksum_address(self._cfg.multi_addr)
+        total_value = await self._get_total_value(nft_addr)
+
+        base = {
+            "from": sender,
+            "value": total_value,
+            "gas": 400_000,
+        }
+
+        if self._cfg.mint_mode == "DIRECT":
+            contract = self._w3.eth.contract(address=nft_addr, abi=ContractSpecs.UNIVERSAL_MINT_ABI)
+            fn = getattr(contract.functions, self._cfg.mint_func_name)
+            return await fn(self._cfg.qty).build_transaction(base)
+
+        if self._cfg.mint_mode == "SEADROP":
+            sea_contract = self._w3.eth.contract(address=sea_addr, abi=ContractSpecs.SEA_ABI)
+            return await sea_contract.functions.mintPublic(
+                nft_addr,
+                AsyncWeb3.to_checksum_address("0x0000a26b00c1F0DF003000390027140000fAa719"),
+                AsyncWeb3.to_checksum_address("0x0000000000000000000000000000000000000000"),
+                self._cfg.qty,
+            ).build_transaction(base)
+
+        if self._cfg.mint_mode == "SEADROP_WL":
+            wl_service = SeaDropWlService(self._cfg.os_api_key)
+            wl_data = await wl_service.fetch_proof(nft_addr, sender)
+            if not wl_data:
+                raise ValueError("Wallet is not eligible for SeaDrop allowlist.")
+            total_value = wl_data["mintPrice"] * self._cfg.qty
+            base["value"] = total_value
+            sea_contract = self._w3.eth.contract(address=sea_addr, abi=ContractSpecs.SEA_ABI)
+            return await sea_contract.functions.mintAllowList(
+                nft_addr,
+                AsyncWeb3.to_checksum_address("0x0000a26b00c1F0DF003000390027140000fAa719"),
+                AsyncWeb3.to_checksum_address("0x0000000000000000000000000000000000000000"),
+                self._cfg.qty,
+                wl_data["mintParams"],
+                wl_data["proof"],
+            ).build_transaction(base)
+
+        multi_contract = self._w3.eth.contract(address=multi_addr, abi=ContractSpecs.MULTI_ABI)
+        return await multi_contract.functions.mintMulti(
+            self._cfg.qty,
+            nft_addr,
+        ).build_transaction(base)
+
+    async def _get_total_value(self, nft_addr: str) -> int:
+        if self._cfg.mint_mode == "DIRECT":
+            return 0
+        try:
+            sea_contract = self._w3.eth.contract(
+                address=AsyncWeb3.to_checksum_address(self._cfg.sea_addr),
+                abi=ContractSpecs.SEA_ABI,
+            )
+            drop_data = await sea_contract.functions.getPublicDrop(nft_addr).call()
+            return int(drop_data[0]) * self._cfg.qty
+        except Exception:
+            return 0

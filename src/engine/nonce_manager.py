@@ -14,7 +14,20 @@ log = logging.getLogger(__name__)
 
 
 class NonceManager:
+    _instances: dict[str, "NonceManager"] = {}
+
+    def __new__(cls, w3: AsyncWeb3, address: str, worker_id: int):
+        key = address.lower()
+        if key not in cls._instances:
+            cls._instances[key] = super().__new__(cls)
+            cls._instances[key]._initialized = False
+        return cls._instances[key]
+
     def __init__(self, w3: AsyncWeb3, address: str, worker_id: int):
+        if getattr(self, "_initialized", False):
+            self._w3 = w3
+            return
+        self._initialized = True
         self._w3 = w3
         self._address = address
         self._uid = worker_id

@@ -1,7 +1,12 @@
 import aiohttp
 import asyncio
+import time
 
 class SeaDropWlService:
+    _cache: dict[tuple[str, str], tuple[float, dict | None]] = {}
+    _locks: dict[tuple[str, str], asyncio.Lock] = {}
+    _ttl_seconds = 600
+
     def __init__(self, api_key: str):
         self._api_key = api_key
         self._base_url = "https://api.opensea.io/api/v2"
@@ -10,6 +15,40 @@ class SeaDropWlService:
         if not self._api_key:
             raise ValueError("OpenSea API Key is required for SEADROP_WL mode")
 
+        cache_key = (contract_address.lower(), wallet_address.lower())
+        cached = self._cache.get(cache_key)
+        now = time.time()
+        if cached and now - cached[0] < self._ttl_seconds:
+            return cached[1]
+
+        lock = self._locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            cached = self._cache.get(cache_key)
+            now = time.time()
+            if cached and now - cached[0] < self._ttl_seconds:
+                return cached[1]
+
+            proof = await self._fetch_proof_uncached(contract_address, wallet_address)
+            self._cache[cache_key] = (now, proof)
+            return proof
+
+    async def prefetch_many(self, contract_address: str, wallet_addresses: list[str], concurrency: int = 8) -> dict[str, dict | None]:
+        semaphore = asyncio.Semaphore(concurrency)
+        results: dict[str, dict | None] = {}
+
+        async def _one(wallet: str):
+            async with semaphore:
+                results[wallet] = await self.fetch_proof(contract_address, wallet)
+
+        await asyncio.gather(*(_one(wallet) for wallet in wallet_addresses))
+        return results
+
+    @classmethod
+    def clear_cache(cls):
+        cls._cache.clear()
+        cls._locks.clear()
+
+    async def _fetch_proof_uncached(self, contract_address: str, wallet_address: str) -> dict | None:
         url = f"{self._base_url}/drops/{contract_address}/allowlist?wallet={wallet_address}"
         headers = {
             "X-API-KEY": self._api_key,

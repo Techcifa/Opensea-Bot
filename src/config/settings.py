@@ -15,9 +15,10 @@ NETWORKS = {
         "id": 1,
         "symbol": "ETH",
         "rpc": [
-            "https://eth.llamarpc.com",
-            f"https://rpc.ankr.com/eth/{ankr_key}" if ankr_key else "https://rpc.ankr.com/eth",
-            "https://cloudflare-eth.com",
+            "https://ethereum-rpc.publicnode.com",
+            "https://rpc.ankr.com/eth",
+            "https://rpc.mevblocker.io",
+            "https://1inch.rpc.grove.city/v1/1",
         ],
         "explorer": "https://etherscan.io",
     },
@@ -25,9 +26,9 @@ NETWORKS = {
         "id": 8453,
         "symbol": "ETH",
         "rpc": [
-            "https://mainnet.base.org",
-            "https://base.llamarpc.com",
-            f"https://rpc.ankr.com/base/{ankr_key}" if ankr_key else "https://rpc.ankr.com/base",
+            "https://base-rpc.publicnode.com",
+            "https://rpc.ankr.com/base",
+            "https://base.meowrpc.com",
         ],
         "explorer": "https://basescan.org",
     },
@@ -35,9 +36,9 @@ NETWORKS = {
         "id": 10,
         "symbol": "ETH",
         "rpc": [
-            "https://mainnet.optimism.io",
-            "https://optimism.llamarpc.com",
-            f"https://rpc.ankr.com/optimism/{ankr_key}" if ankr_key else "https://rpc.ankr.com/optimism",
+            "https://optimism-rpc.publicnode.com",
+            "https://rpc.ankr.com/optimism",
+            "https://op-geth.orbs.network",
         ],
         "explorer": "https://optimistic.etherscan.io",
     },
@@ -45,9 +46,9 @@ NETWORKS = {
         "id": 42161,
         "symbol": "ETH",
         "rpc": [
-            "https://arb1.arbitrum.io/rpc",
-            "https://arbitrum.llamarpc.com",
-            f"https://rpc.ankr.com/arbitrum/{ankr_key}" if ankr_key else "https://rpc.ankr.com/arbitrum",
+            "https://arbitrum-one-rpc.publicnode.com",
+            "https://rpc.ankr.com/arbitrum",
+            "https://arb-mainnet.g.allthatnode.com",
         ],
         "explorer": "https://arbiscan.io",
     },
@@ -55,9 +56,9 @@ NETWORKS = {
         "id": 137,
         "symbol": "MATIC",
         "rpc": [
-            "https://polygon-rpc.com",
-            "https://polygon.llamarpc.com",
-            f"https://rpc.ankr.com/polygon/{ankr_key}" if ankr_key else "https://rpc.ankr.com/polygon",
+            "https://polygon-bor-rpc.publicnode.com",
+            "https://rpc.ankr.com/polygon",
+            "https://polygon.meowrpc.com",
         ],
         "explorer": "https://polygonscan.com",
     },
@@ -74,8 +75,9 @@ NETWORKS = {
         "id": 56,
         "symbol": "BNB",
         "rpc": [
-            "https://bsc-dataseed.binance.org",
-            f"https://rpc.ankr.com/bsc/{ankr_key}" if ankr_key else "https://rpc.ankr.com/bsc",
+            "https://bsc-rpc.publicnode.com",
+            "https://rpc.ankr.com/bsc",
+            "https://bsc.meowrpc.com",
         ],
         "explorer": "https://bscscan.com",
     },
@@ -163,6 +165,10 @@ class ConfigurationManager:
     def _load_config(self):
         # Network
         self.rpc_ticker = os.getenv("NETWORK", "ETH").upper()
+        
+        # Custom Dedicated RPCs (comma-separated list in .env)
+        raw_custom = os.getenv("CUSTOM_RPCS", "").strip()
+        self.custom_rpcs = [x.strip() for x in raw_custom.split(",") if x.strip()] if raw_custom else []
 
         # System contracts
         self.sea_addr = os.getenv("SEA_DROP_ADDRESS", "0x00005EA00Ac477B1030CE78506496e8C2dE24bf5")
@@ -171,6 +177,8 @@ class ConfigurationManager:
         # Target
         self.target_nft = os.getenv("NFT_CONTRACT_ADDRESS", "")
         self.qty = int(os.getenv("MINT_QUANTITY", 1))
+        self._safe_float("mint_price_eth", "MINT_PRICE_ETH", 0.0)
+        self.mint_price_wei = int(self.mint_price_eth * 1e18)
 
         # Manual price override (skips SeaDrop getPublicDrop lookup)
         raw_price = os.getenv("MINT_PRICE_ETH", "").strip()
@@ -223,6 +231,18 @@ class ConfigurationManager:
             except FileNotFoundError:
                 pass
 
+        # Speed / Latency Optimizations
+        self.skip_simulation = self._bool("SKIP_SIMULATION")
+        self.skip_gas_estimate = self._bool("SKIP_GAS_ESTIMATE")
+        self.auto_turbo_after_preflight = os.getenv("AUTO_TURBO_AFTER_PREFLIGHT", "true").strip().lower() in ("true", "1", "yes", "on")
+        self.use_wss = self._bool("USE_WSS")
+        
+        # Phase 3: Mempool Sniping
+        self.mempool_sniping_enabled = self._bool("MEMPOOL_SNIPING_ENABLED")
+        self.snipe_target_method = os.getenv("SNIPE_TARGET_METHOD", "")
+        self.contract_owner = os.getenv("CONTRACT_OWNER_ADDRESS", "")
+        self._safe_float("snipe_gas_multiplier", "SNIPE_GAS_MULTIPLIER", 1.5)
+
         # Auto-funder
         self.fund_enabled = self._bool("AUTO_FUND_ENABLED")
         self.master_pk = os.getenv("MASTER_PRIVATE_KEY", "")
@@ -270,6 +290,38 @@ class ConfigurationManager:
 
         # OpenSea
         self.os_api_key = os.getenv("OS_API_KEY", "")
+
+        # Inject Ankr API Key into global NETWORKS if available
+        ankr_key = os.getenv("ANKR_API_KEY", "").strip()
+        for net in NETWORKS.values():
+            for i, rpc in enumerate(net["rpc"]):
+                if "rpc.ankr.com" in rpc:
+                    if ankr_key and ankr_key not in rpc:
+                        if self.use_wss:
+                            net["rpc"][i] = f"{rpc.replace('https://', 'wss://')}/ws/{ankr_key}"
+                        else:
+                            net["rpc"][i] = f"{rpc.rstrip('/')}/{ankr_key}"
+                            
+            # Add free public WSS if requested
+            if self.use_wss:
+                if net["id"] == 1:
+                    net["rpc"].insert(0, "wss://ethereum-rpc.publicnode.com")
+                elif net["id"] == 8453:
+                    net["rpc"].insert(0, "wss://base-rpc.publicnode.com")
+                elif net["id"] == 10:
+                    net["rpc"].insert(0, "wss://optimism-rpc.publicnode.com")
+                elif net["id"] == 42161:
+                    net["rpc"].insert(0, "wss://arbitrum-one-rpc.publicnode.com")
+                elif net["id"] == 137:
+                    net["rpc"].insert(0, "wss://polygon-bor-rpc.publicnode.com")
+                elif net["id"] == 56:
+                    net["rpc"].insert(0, "wss://bsc-rpc.publicnode.com")
+                    
+        # Dynamically prepend custom RPCs to the active network
+        active_net = NETWORKS.get(self.rpc_ticker)
+        if active_net and self.custom_rpcs:
+            # Prepend custom RPCs to ensure they are raced first
+            active_net["rpc"] = self.custom_rpcs + active_net["rpc"]
 
     # ------------------------------------------------------------------
     def _bool(self, key: str, default: str = "false") -> bool:

@@ -21,7 +21,19 @@ venv/
 env/
 .env
 
-# OS
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Application specific
+history.csv
+app.log
+proxies.txt
+runs/
+
+# OS generated files
 .DS_Store
 Thumbs.db
 

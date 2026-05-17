@@ -30,9 +30,6 @@ import os
 import sys
 import asyncio
 import time
-import logging
-import traceback
-from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -45,15 +42,34 @@ from eth_account import Account
 sys.path.insert(0, os.path.dirname(__file__))
 
 from src.utils.core import SystemCompliance
-from src.config.settings import ConfigurationManager
+
+SystemCompliance.assert_version()
+
+# ---------------------------------------------------------------------------
+# Boot order matters:
+# 1. ConfigurationManager MUST be instantiated first — it injects ANKR_API_KEY
+#    into the NETWORKS dict URL strings.
+# 2. Only AFTER that should rpc_health be imported/initialised, so it copies
+#    the authenticated URLs into its healthy_rpcs pool.
+# ---------------------------------------------------------------------------
+from src.config.settings import ConfigurationManager, NETWORKS
+
+# Trigger Ankr key injection into NETWORKS immediately
+_boot_cfg = ConfigurationManager()
+
+# Now safe to import modules that depend on authenticated NETWORKS URLs
+from src.utils.rpc_health import rpc_health
 from src.orchestrator import orchestrator
 from src.gas_oracle import gas_oracle
 from src.engine.dead_letter_queue import dlq
 from src.features.accountant import Accountant
 from src.preflight import PreflightChecker
-from src.utils.rpc_health import rpc_health
+from src.utils.run_logger import RunLogger
 
-SystemCompliance.assert_version()
+# Rebuild rpc_health pool in case it was seeded before Ankr key injection
+rpc_health.healthy_rpcs = {
+    ticker: list(info["rpc"]) for ticker, info in NETWORKS.items()
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -243,6 +259,9 @@ async def require_api_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+_last_preflight: dict = {}
+_PREFLIGHT_TTL_SECONDS = 600
+
 
 # ---------------------------------------------------------------------------
 # Request / Response models
@@ -399,18 +418,42 @@ async def start_bot(req: StartRequest):
     """Start the bot with provided keys and optional config overrides."""
     if not req.keys:
         raise HTTPException(status_code=400, detail="No private keys provided.")
+    addresses = _addresses_from_keys(req.keys)
+    if len(set(addr.lower() for addr in addresses)) != len(addresses):
+        raise HTTPException(status_code=400, detail="Duplicate wallet detected. Remove repeated private keys before launch.")
 
     _validate_keys(req.keys)
     _apply_overrides(req.config_overrides)    # FIX C-07: allowlist enforced
     ConfigurationManager._instance = None
 
     cfg = ConfigurationManager()
+    rpc_health.reload_config()
+    gas_oracle.reload_config()
     if not cfg.target_nft or cfg.target_nft.startswith("0xYour"):
         raise HTTPException(status_code=400, detail="NFT_CONTRACT_ADDRESS is not configured in .env")
 
-    SessionStore.save(req.keys, req.config_overrides)   # FIX C-01: encrypted
+    turbo_enabled = False
+    fingerprint = _preflight_fingerprint(addresses, req.config_overrides or {})
+    if cfg.auto_turbo_after_preflight and _preflight_is_fresh(fingerprint):
+        os.environ["SKIP_SIMULATION"] = "true"
+        os.environ["SKIP_GAS_ESTIMATE"] = "true"
+        os.environ["PRE_SIGN_ENABLED"] = "true"
+        ConfigurationManager._instance = None
+        cfg = ConfigurationManager()
+        rpc_health.reload_config()
+        gas_oracle.reload_config()
+        turbo_enabled = True
+
+    RunLogger.log_event(
+        "launch_requested",
+        wallets=len(addresses),
+        network=cfg.rpc_ticker,
+        mint_mode=cfg.mint_mode,
+        turbo_enabled=turbo_enabled,
+        target_nft=cfg.target_nft,
+    )
     asyncio.create_task(orchestrator.start(req.keys))
-    return {"status": "starting", "workers": len(req.keys)}
+    return {"status": "starting", "workers": len(req.keys), "turbo_enabled": turbo_enabled}
 
 
 @app.post("/api/stop", dependencies=[Depends(require_api_key)])
@@ -428,14 +471,39 @@ async def stop_bot():
 async def preflight(req: PreflightRequest):
     if not req.keys:
         raise HTTPException(status_code=400, detail="No keys provided for preflight.")
-
-    _validate_keys(req.keys)
-    _apply_overrides(req.config_overrides)    # FIX C-07
+    addresses = _addresses_from_keys(req.keys)
+    if len(set(addr.lower() for addr in addresses)) != len(addresses):
+        return {"checks": [{
+            "label": "Wallet Set",
+            "status": "error",
+            "detail": "Duplicate wallet detected. Remove repeated private keys before launch."
+        }], "passed": False}
+        
+    if req.config_overrides:
+        skip_empty = {"OS_API_KEY"}  # allow .env to provide secrets unless explicitly set
+        for k, v in req.config_overrides.items():
+            val = "" if v is None else str(v)
+            if k in skip_empty and val == "":
+                continue
+            os.environ[k] = val
+    # Reset singleton so overrides take effect for Preflight Check
     ConfigurationManager._instance = None
-
+    ConfigurationManager()
+    rpc_health.reload_config()
+    gas_oracle.reload_config()
+            
     checker = PreflightChecker(req.keys)
     results = await checker.run()
-    return {"checks": results}
+    passed = all(c.get("status") != "error" for c in results)
+    fingerprint = _preflight_fingerprint(addresses, req.config_overrides or {})
+    _last_preflight.clear()
+    _last_preflight.update({
+        "fingerprint": fingerprint,
+        "passed": passed,
+        "timestamp": time.time(),
+    })
+    RunLogger.log_event("preflight_completed", wallets=len(addresses), passed=passed)
+    return {"checks": results, "passed": passed, "turbo_ready": passed}
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +539,43 @@ async def get_dlq():
 async def clear_dlq():
     await dlq.clear()
     return {"status": "cleared"}
+
+
+@app.get("/api/health")
+async def health_check():
+    """Liveness probe for deployment platforms (Render, Railway, etc)."""
+    return {"status": "healthy", "version": "2.0.0"}
+
+
+def _addresses_from_keys(keys: list[str]) -> list[str]:
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid private key: {str(e)[:60]}")
+    return addresses
+
+
+def _preflight_fingerprint(addresses: list[str], overrides: dict) -> str:
+    relevant_overrides = {
+        k: str(v) for k, v in sorted((overrides or {}).items())
+        if k not in {"OS_API_KEY", "MASTER_PRIVATE_KEY", "DISCORD_WEBHOOK_URL", "ANKR_API_KEY"}
+    }
+    payload = {
+        "addresses": sorted(addr.lower() for addr in addresses),
+        "overrides": relevant_overrides,
+    }
+    raw = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _preflight_is_fresh(fingerprint: str) -> bool:
+    if not _last_preflight.get("passed"):
+        return False
+    if _last_preflight.get("fingerprint") != fingerprint:
+        return False
+    return time.time() - float(_last_preflight.get("timestamp", 0)) <= _PREFLIGHT_TTL_SECONDS
 
 
 # ---------------------------------------------------------------------------

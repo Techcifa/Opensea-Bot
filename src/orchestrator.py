@@ -11,15 +11,16 @@ FIXES:
 import asyncio
 import json
 import time
-import random
-import traceback
-import logging
+from eth_account import Account
 
 from src.config.settings import ConfigurationManager
 from src.engine.execution import ExecutionUnit
 from src.engine.dead_letter_queue import dlq
+from src.engine.seadrop_wl import SeaDropWlService
+from src.features.funder import MassFunder
 from src.gas_oracle import gas_oracle
 from src.utils.rpc_health import rpc_health
+from src.utils.run_logger import RunLogger
 
 log = logging.getLogger(__name__)
 
@@ -30,9 +31,8 @@ class BotOrchestrator:
         self._clients: set = set()      # WebSocket connections
         self._running  = False
         self._start_time: float | None = None
-        self._shutdown_event = asyncio.Event()
-        # FIX C-05: prevents TOCTOU race between lifespan resume + HTTP start
-        self._start_lock = asyncio.Lock()
+        self.snipe_event = asyncio.Event()
+        self._mempool_sniper = None
 
     # ------------------------------------------------------------------
     # WebSocket client management
@@ -70,10 +70,18 @@ class BotOrchestrator:
                 })
                 return
 
-            self._running    = True
-            self._start_time = time.time()
-            self._shutdown_event.clear()
-            cfg = ConfigurationManager()
+        self._running = True
+        self._start_time = time.time()
+        cfg = ConfigurationManager()
+        RunLogger.log_event(
+            "orchestrator_start",
+            workers=len(keys),
+            network=cfg.rpc_ticker,
+            mint_mode=cfg.mint_mode,
+            skip_simulation=cfg.skip_simulation,
+            skip_gas_estimate=cfg.skip_gas_estimate,
+            presign_enabled=cfg.presign_enabled,
+        )
 
         await self._broadcast({"type": "status", "status": "STARTING", "timestamp": int(time.time())})
         await self._broadcast({
@@ -120,6 +128,22 @@ class BotOrchestrator:
 
         # Clear dead letter queue from last run
         await dlq.clear()
+
+        if cfg.mint_mode == "SEADROP_WL":
+            await self._prefetch_allowlist_proofs(cfg, keys)
+
+        # Initialize and start Mempool Sniper (Phase 3)
+        self.snipe_event.clear()
+        if not cfg.mempool_sniping_enabled or cfg.force_start:
+            self.snipe_event.set()
+        else:
+            from src.engine.mempool_sniper import MempoolSniper
+            self._mempool_sniper = MempoolSniper(
+                cfg=cfg,
+                rpc_list=rpc_health.get_rpcs(cfg.rpc_ticker),
+                trigger_callback=self._on_mempool_snipe
+            )
+            self._mempool_sniper.start()
 
         # Priority sorting: lower number = higher priority = spawned first
         indexed_keys = list(enumerate(keys, 1))
@@ -188,49 +212,83 @@ class BotOrchestrator:
                             "timestamp": int(time.time()),
                         })
 
-                    if not cfg.force_start:
-                        break
+    async def _prefetch_allowlist_proofs(self, cfg: ConfigurationManager, keys: list[str]):
+        t0 = time.perf_counter()
+        await self._broadcast({
+            "type": "log", "level": "INFO", "worker_id": "SYS",
+            "message": "Prefetching SeaDrop allowlist proofs...",
+            "timestamp": int(time.time())
+        })
+        try:
+            wallets = [Account.from_key(pk).address for pk in keys]
+            service = SeaDropWlService(cfg.os_api_key)
+            results = await service.prefetch_many(cfg.target_nft, wallets)
+            eligible = sum(1 for proof in results.values() if proof)
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+            RunLogger.log_event(
+                "allowlist_prefetch",
+                wallets=len(wallets),
+                eligible=eligible,
+                elapsed_ms=elapsed_ms,
+            )
+            await self._broadcast({
+                "type": "log", "level": "SUCCESS" if eligible else "WARNING", "worker_id": "SYS",
+                "message": f"SeaDrop allowlist proof cache warmed: {eligible}/{len(wallets)} eligible in {elapsed_ms:.0f}ms.",
+                "timestamp": int(time.time())
+            })
+        except Exception as e:
+            RunLogger.log_event(
+                "allowlist_prefetch_failed",
+                error=str(e)[:180],
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 2),
+            )
+            await self._broadcast({
+                "type": "log", "level": "ERROR", "worker_id": "SYS",
+                "message": f"SeaDrop allowlist prefetch failed: {str(e)[:120]}",
+                "timestamp": int(time.time())
+            })
 
-                # Delay before retry
-                delay = random.uniform(cfg.delay_range[0], cfg.delay_range[1])
-                await asyncio.sleep(delay)
+    async def _on_mempool_snipe(self, tx):
+        self.snipe_event.set()
+        tx_hash = tx.get("hash") if tx else "FALLBACK_POLLING"
+        await self._broadcast({
+            "type": "log", "level": "SUCCESS", "worker_id": "SYS",
+            "message": f"🎯 MEMPOOL SNIPER TRIGGERED via tx: {tx_hash}! Launching all workers...",
+            "timestamp": int(time.time())
+        })
 
-            except asyncio.CancelledError:
-                await self._broadcast({
-                    "type": "log", "level": "INFO", "worker_id": worker_id,
-                    "message": "Worker cancelled.", "timestamp": int(time.time()),
-                })
-                return
-
-            except Exception as exc:
-                tb = traceback.format_exc()
-                await self._broadcast({
-                    "type": "log", "level": "ERROR", "worker_id": worker_id,
-                    "message": f"Execution error: {str(exc)[:200]}",
-                    "traceback": tb[:500],
-                    "timestamp": int(time.time()),
-                })
-                log.error("Worker %s error (attempt %d): %s", worker_id, attempt, exc)
-
-                # Push to DLQ
-                try:
-                    await dlq.push({
-                        "worker_id":   worker_id,
-                        "wallet":      execution_unit._acct.address,
-                        "error":       str(exc)[:200],
-                        "timestamp":   time.time(),
-                        "retry_count": attempt,      # FIX H-07: was 'attempt' key
-                        "traceback":   tb[:500],
-                    })
-                except Exception:
-                    pass
-
-                # Delay before retry
-                delay = random.uniform(cfg.delay_range[0], cfg.delay_range[1])
-                await asyncio.sleep(delay)
+    async def _watch_completion(self):
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._running = False
+        await self._broadcast({"type": "status", "status": "DONE",
+                                "timestamp": int(time.time())})
+        await self._broadcast({"type": "log", "level": "INFO", "worker_id": "SYS",
+                                "message": "All operations complete.", "timestamp": int(time.time())})
 
     # ------------------------------------------------------------------
-    # Status
+    # Shutdown
+    # ------------------------------------------------------------------
+    async def stop(self):
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._running = False
+        gas_oracle.stop()
+        if self._mempool_sniper:
+            self._mempool_sniper.stop()
+            self._mempool_sniper = None
+
+        await self._broadcast({"type": "status", "status": "STOPPED",
+                                "timestamp": int(time.time())})
+        await self._broadcast({"type": "log", "level": "INFO", "worker_id": "SYS",
+                                "message": "Bot stopped gracefully.", "timestamp": int(time.time())})
+
+    # ------------------------------------------------------------------
+    # Status snapshot
     # ------------------------------------------------------------------
     def get_status(self) -> dict:
         uptime = (time.time() - self._start_time) if self._start_time else 0

@@ -6,6 +6,8 @@ FIX H-07: Unified field name 'retry_count' everywhere (was 'attempt' in
 """
 
 import asyncio
+import json
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -38,24 +40,14 @@ class DeadLetterQueue:
           - push({"worker_id": ..., "error": ..., "wallet": ..., ...})
         """
         async with self._lock:
-            if args and isinstance(args[0], dict):
-                data = args[0]
-                job = FailedJob(
-                    worker_id=str(data.get("worker_id", "Unknown")),
-                    wallet=data.get("wallet", "N/A"),
-                    error=data.get("error", "Unknown error")[:400],
-                    timestamp=data.get("timestamp", time.time()),
-                    retry_count=data.get("retry_count", data.get("attempt", 1)),  # accept old key too
-                    traceback=data.get("traceback", ""),
-                )
-            else:
-                worker_id = str(args[0]) if len(args) > 0 else str(kwargs.get("worker_id", 0))
-                wallet    = args[1] if len(args) > 1 else kwargs.get("wallet", "N/A")
-                error     = args[2] if len(args) > 2 else kwargs.get("error", "Unknown")
-                retry_count = args[3] if len(args) > 3 else kwargs.get("retry_count", 1)
-                job = FailedJob(worker_id=worker_id, wallet=wallet, error=error, retry_count=retry_count)
-
+            job = FailedJob(
+                worker_id=worker_id,
+                wallet=wallet,
+                error=error,
+                attempt=attempt,
+            )
             self._jobs.append(job)
+            self._persist(job)
 
     async def get_all(self) -> list[dict]:
         async with self._lock:
@@ -83,9 +75,17 @@ class DeadLetterQueue:
                 if not (j.worker_id == str(worker_id) and j.wallet == wallet)
             ]
 
-    async def size(self) -> int:
-        async with self._lock:
-            return len(self._jobs)
+    def _persist(self, job: FailedJob):
+        os.makedirs("runs", exist_ok=True)
+        path = os.path.join("runs", "dead_letter_queue.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "worker_id": job.worker_id,
+                "wallet": job.wallet,
+                "error": job.error,
+                "timestamp": job.timestamp,
+                "attempt": job.attempt,
+            }) + "\n")
 
 
 dlq = DeadLetterQueue()

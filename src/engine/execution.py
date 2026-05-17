@@ -23,16 +23,20 @@ import time
 import random
 import logging
 import aiohttp
-from typing import Callable, Any
+from eth_utils import keccak
+from datetime import datetime
+from contextlib import asynccontextmanager
 
 from web3 import AsyncWeb3, AsyncHTTPProvider
 from eth_account import Account
 
 from src.config.settings import ContractSpecs, ConfigurationManager, NETWORKS
-from src.utils.core import async_error_handler  # noqa: F401 — available for future use
+from src.utils.core import async_error_handler
+from src.utils.revert_decoder import decode_revert_error
 from src.utils.verifier import ContractVerifier
 from src.utils.rpc_health import rpc_health
 from src.utils.rpc_rate_limiter import rpc_limiter
+from src.utils.run_logger import RunLogger
 from src.gas_oracle import gas_oracle
 from src.engine.nonce_manager import NonceManager
 from src.engine.dead_letter_queue import dlq
@@ -122,8 +126,14 @@ class ExecutionUnit:
     # Web3 setup & RPC rotation (FIX C-03: use cache)
     # ------------------------------------------------------------------
     def _init_web3(self):
-        url      = self._rpc_list[self._rpc_index % len(self._rpc_list)]
-        self.w3  = _get_cached_w3(url, self._proxy_url)
+        url = self._rpc_list[self._rpc_index % len(self._rpc_list)]
+        if url.startswith("wss://") or url.startswith("ws://"):
+            self.w3 = AsyncWeb3(AsyncWeb3.WebSocketProvider(url))
+        else:
+            kwargs = {}
+            if self._proxy_url:
+                kwargs = {"proxy": self._proxy_url}
+            self.w3 = AsyncWeb3(AsyncHTTPProvider(url, request_kwargs=kwargs))
 
     async def _rotate_rpc(self):
         self._rpc_index += 1
@@ -205,6 +215,21 @@ class ExecutionUnit:
             gwei = gas_oracle.get_current().get("max_fee_gwei", "?")
             await self._log("WARNING", f"[Gas Guardian] Gas {gwei} Gwei > ceiling. Pausing...")
             await asyncio.sleep(5)
+
+    @asynccontextmanager
+    async def _rpc_call(self):
+        """Phase 3 Rate Limiting: Acquire endpoint token, track 429s/backoffs."""
+        endpoint = self.w3.provider.endpoint_uri
+        async with rpc_limiter.acquire(endpoint):
+            try:
+                yield
+                rpc_limiter.report_success(endpoint)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "rate limit" in err_str or "too many requests" in err_str:
+                    rpc_limiter.report_rate_limit(endpoint)
+                raise
+
 
     # ------------------------------------------------------------------
     # 429 / RPC error handling
@@ -303,210 +328,96 @@ class ExecutionUnit:
             return True, "", False
 
         try:
-            await self.w3.eth.call({
-                "from":  self._acct.address,
-                "to":    tx_data["to"],
-                "data":  tx_data.get("data", "0x"),
-                "value": tx_data.get("value", 0),
-            })
-            return True, "", False
-        except Exception as exc:
-            raw = str(exc)
-            reason = self._decode_revert(raw)
+            async with self._rpc_call():
+                await self.w3.eth.call({
+                    "from": self._acct.address,
+                    "to": tx_data["to"],
+                    "data": tx_data.get("data", "0x"),
+                    "value": tx_data.get("value", 0),
+                })
+            return True, ""
+        except Exception as e:
+            raw_reason = str(e)
+            reason = decode_revert_error(e)
+            # Try to extract revert reason
+            if "revert" in raw_reason.lower() or reason != raw_reason:
+                return False, reason[:120]
+            # Other errors (network, etc.) — allow through
+            return True, ""
 
-            # Empty revert (0x) = contract gave no error string.
-            # 99% of the time this means "mint not open yet" or a Solidity
-            # require(false) with no message.  Treat as retryable.
-            if reason in ("0x", ""):
-                return False, "Mint not open yet (empty revert 0x) — will retry", True
-
-            # Real revert with a message = configuration error, wrong price, sold out, etc.
-            return False, reason[:200], False
-
-    @staticmethod
-    def _decode_revert(raw: str) -> str:
-        """Try to extract a human-readable revert message from a web3 exception string."""
-        # web3.py wraps it as: ContractLogicError('execution reverted: Reason', '0x...')
-        # or as a tuple string: ("execution reverted", "0x08c379a0...")
-        import re
-
-        # Try to extract the hex payload
-        hex_match = re.search(r"0x[0-9a-fA-F]{8,}", raw)
-        if not hex_match:
-            # No hex data — check for plain text reason
-            text_match = re.search(r"execution reverted:?\s*(.+)", raw, re.IGNORECASE)
-            if text_match:
-                return text_match.group(1).strip()
-            # Truly empty
-            return "0x"
-
-        hex_data = hex_match.group(0)
-        if hex_data in ("0x", ""):
-            return "0x"
-
-        # Standard Error(string) ABI encoding: selector 0x08c379a0
-        if hex_data.startswith("0x08c379a0") and len(hex_data) > 10:
-            try:
-                payload = bytes.fromhex(hex_data[10:])
-                # ABI-decoded: offset(32) + length(32) + string
-                if len(payload) >= 64:
-                    str_len = int.from_bytes(payload[32:64], "big")
-                    msg = payload[64:64 + str_len].decode("utf-8", errors="replace")
-                    return msg
-            except Exception:
-                pass
-
-        # Panic(uint256): selector 0x4e487b71
-        if hex_data.startswith("0x4e487b71") and len(hex_data) >= 74:
-            try:
-                code = int(hex_data[2 + 8 + 64 - 64:], 16)
-                panic_codes = {
-                    1: "assert failed", 17: "arithmetic overflow",
-                    18: "division by zero", 32: "array out-of-bounds",
-                    33: "invalid enum", 49: "empty storage", 50: "pop empty array",
-                    65: "out of memory"
+    async def _replay_revert_reason(self, tx_hash: bytes, receipt, fallback_tx: dict | None = None) -> str:
+        try:
+            tx_obj = fallback_tx
+            if tx_obj is None:
+                async with self._rpc_call():
+                    chain_tx = await self.w3.eth.get_transaction(tx_hash)
+                tx_obj = {
+                    "from": chain_tx["from"],
+                    "to": chain_tx["to"],
+                    "data": chain_tx.get("input", "0x"),
+                    "value": chain_tx.get("value", 0),
                 }
-                return f"Panic: {panic_codes.get(code, f'code {code}')}"
-            except Exception:
-                pass
-
-        return raw[:120]
-
-    # ------------------------------------------------------------------
-    # FIX C-06: Receipt polling with RPC rotation
-    # ------------------------------------------------------------------
-    async def _wait_receipt_with_rotation(self, tx_hash: bytes, timeout: int = 120) -> Any:
-        """
-        Poll all healthy RPCs for the receipt, rotating on failure.
-        Raises asyncio.TimeoutError if not confirmed within `timeout` seconds.
-        """
-        deadline      = time.monotonic() + timeout
-        poll_interval = 2.0
-        tx_hex        = tx_hash.hex() if isinstance(tx_hash, bytes) else tx_hash
-        if not tx_hex.startswith("0x"):
-            tx_hex = "0x" + tx_hex
-
-        while time.monotonic() < deadline:
-            rpcs = rpc_health.get_prioritized_rpcs(self._cfg.rpc_ticker)
-            for url in rpcs:
-                w3_tmp = _get_cached_w3(url, self._proxy_url)   # FIX C-03: use cache
-                try:
-                    receipt = await asyncio.wait_for(
-                        w3_tmp.eth.get_transaction_receipt(tx_hex),
-                        timeout=4.0,
-                    )
-                    if receipt is not None:
-                        return receipt
-                except Exception:
-                    continue
-            await asyncio.sleep(poll_interval)
-
-        raise asyncio.TimeoutError(f"Receipt for {tx_hex[:12]}... not found after {timeout}s")
+            else:
+                tx_obj = {
+                    "from": tx_obj.get("from", self._acct.address),
+                    "to": tx_obj.get("to"),
+                    "data": tx_obj.get("data", "0x"),
+                    "value": tx_obj.get("value", 0),
+                }
+            async with self._rpc_call():
+                await self.w3.eth.call(tx_obj, block_identifier=receipt.blockNumber)
+        except Exception as e:
+            return decode_revert_error(e)[:180]
+        return "Transaction reverted without a decoded reason."
 
     # ------------------------------------------------------------------
-    # FIX M-06: Gas bumping — resubmit if TX is stuck
+    # Broadcast Racing
     # ------------------------------------------------------------------
-    async def _maybe_bump_gas(
-        self,
-        tx_hash: bytes,
-        original_tx: dict,
-        original_gas_params: dict,
-        nonce: int,
-        broadcast_block: int,
-    ) -> bytes | None:
-        """
-        Check if TX is stuck after bump_after_blocks blocks.
-        If so, resubmit with bumped gas params and the same nonce.
-        Returns the new tx_hash if bumped, or None if confirmation seen.
-        """
-        cfg = self._cfg
-        if cfg.bump_after_blocks <= 0:
-            return None
-
-        try:
-            current_block = await asyncio.wait_for(self.w3.eth.block_number, timeout=4)
-        except Exception:
-            return None
-
-        if current_block - broadcast_block < cfg.bump_after_blocks:
-            return None
-
-        # Check if already confirmed
-        try:
-            receipt = await asyncio.wait_for(
-                self.w3.eth.get_transaction_receipt(tx_hash), timeout=4
-            )
-            if receipt is not None:
-                return None   # Already mined
-        except Exception:
-            pass
-
-        # Bump params and resubmit with the same nonce (replaces the old TX)
-        attempt = max(1, current_block - broadcast_block - cfg.bump_after_blocks + 1)
-        bumped  = await gas_oracle.bump_gas_params(original_gas_params, attempt)
-        bumped  = self._cap_gas_params(bumped)
-
-        bumped_tx = {**original_tx, **bumped, "nonce": nonce}
-        try:
-            signed   = self._acct.sign_transaction(bumped_tx)
-            new_hash = await self._broadcast_parallel(signed.raw_transaction)
-            await self._log("WARNING",
-                f"[Gas Bump] Attempt {attempt}: bumped maxFee → "
-                f"{bumped.get('maxFeePerGas', 0) / 1e9:.2f} Gwei | new TX: {new_hash.hex()[:10]}..."
-            )
-            return new_hash
-        except Exception as exc:
-            await self._log("WARNING", f"[Gas Bump] Resubmit failed: {exc}")
-            return None
-
-    # ------------------------------------------------------------------
-    # FIX H-09: RPC Race Strategy — wait ALL_COMPLETED then pick first success
-    # ------------------------------------------------------------------
-    async def _broadcast_parallel(self, signed_raw_tx: bytes) -> bytes:
-        rpcs    = rpc_health.get_prioritized_rpcs(self._cfg.rpc_ticker)
-        targets = rpcs[:5]
-        await self._log("INFO", f"🚀 [Race Strategy] Broadcasting to {len(targets)} nodes simultaneously...")
-
-        async def _single_broadcast(url: str) -> tuple[bytes, str]:
-            w3_node = _get_cached_w3(url, self._proxy_url)
-            async with rpc_limiter.acquire(url):
-                try:
-                    tx_hash = await w3_node.eth.send_raw_transaction(signed_raw_tx)
-                    if url in rpc_health.stats:
-                        rpc_health.stats[url]["score"] = min(1.0, rpc_health.stats[url].get("score", 0.5) + 0.05)
-                    rpc_limiter.report_success(url)
-                    return tx_hash, url
-                except Exception as exc:
-                    # Penalise overloaded/rate-limited nodes immediately so they lose priority
-                    if ExecutionUnit._is_rate_limited(exc) or ExecutionUnit._is_retryable_rpc_error(exc):
-                        rpc_limiter.report_rate_limit(url)
-                        if url in rpc_health.stats:
-                            rpc_health.stats[url]["score"] = max(0.0, rpc_health.stats[url].get("score", 0.5) - 0.3)
-                    raise
-
-        tasks = [asyncio.create_task(_single_broadcast(url)) for url in targets]
-        if not tasks:
-            raise Exception("No healthy RPCs available for broadcast")
-
-        # FIX H-09: Wait for ALL tasks (with short timeout), then pick first success.
-        # Previously waited for FIRST_COMPLETED which cancelled tasks that may have
-        # already accepted the TX — causing false failures and nonce re-use.
-        done, pending = await asyncio.wait(tasks, timeout=10, return_when=asyncio.ALL_COMPLETED)
-        # Cancel any stragglers (shouldn't be any with ALL_COMPLETED+timeout, but be safe)
-        for p in pending:
-            p.cancel()
-
-        first_exc = None
-        for task in done:
+    async def _broadcast_race(self, signed_raw_tx: bytes) -> bytes:
+        """Phase 1 Speed: Spam all healthy RPC nodes simultaneously."""
+        hex_tx = signed_raw_tx.hex() if isinstance(signed_raw_tx, bytes) else signed_raw_tx
+        if not hex_tx.startswith("0x"):
+            hex_tx = "0x" + hex_tx
+        raw_bytes = bytes.fromhex(hex_tx.removeprefix("0x"))
+        local_hash = keccak(raw_bytes)
+            
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_sendRawTransaction",
+            "params": [hex_tx],
+            "id": 1
+        }
+        
+        async def _post(url: str):
             try:
-                tx_h, win_url = task.result()
-                await self._log("SUCCESS", f"⚡ Node Won: {str(win_url)[:30]}...")
-                return tx_h
-            except Exception as exc:
-                first_exc = exc
-                continue
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload, timeout=2.0) as resp:
+                        res = await resp.json()
+                        if "result" in res:
+                            return bytes.fromhex(res["result"].lstrip("0x"))
+                        err_msg = str(res.get("error", "")).lower()
+                        if "already known" in err_msg or "known transaction" in err_msg:
+                            return local_hash
+                        return None
+            except Exception:
+                return None
 
-        raise Exception(f"All nodes failed to broadcast: {first_exc}")
+        tasks = [_post(url) for url in self._rpc_list if url.startswith("http://") or url.startswith("https://")]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for r in results:
+            if isinstance(r, bytes):
+                return r
+                
+        # Fallback to standard W3 broadcast
+        async with self._rpc_call():
+            try:
+                return await self.w3.eth.send_raw_transaction(signed_raw_tx)
+            except Exception as e:
+                err = str(e).lower()
+                if "already known" in err or "known transaction" in err:
+                    return local_hash
+                raise
 
     # ------------------------------------------------------------------
     # Flashbots submission
@@ -528,7 +439,8 @@ class ExecutionUnit:
     # ------------------------------------------------------------------
     async def _build_mint_tx(self, nft_addr_c: str, total_value: int,
                               gas_params: dict, nonce: int) -> dict | None:
-        sea_addr_c   = AsyncWeb3.to_checksum_address(self._cfg.sea_addr)
+        t0 = time.perf_counter()
+        sea_addr_c = AsyncWeb3.to_checksum_address(self._cfg.sea_addr)
         multi_addr_c = AsyncWeb3.to_checksum_address(self._cfg.multi_addr)
         fallback_gas = {
             "DIRECT":     self._cfg.direct_fallback_gas_limit,
@@ -580,23 +492,37 @@ class ExecutionUnit:
                 "value": total_value, "nonce": nonce, "gas": fallback_gas, **gas_params,
             })
 
-        # Gas estimation with fallback
-        try:
-            est_tx = tx.copy()
-            est_tx.pop("gas", None)
-            est       = await self.w3.eth.estimate_gas(est_tx)
-            tx["gas"] = max(21_000, int(est * self._cfg.gas_estimate_multiplier))
-        except Exception:
-            tx["gas"] = fallback_gas
+        # Gas estimation
+        if self._cfg.skip_gas_estimate:
+            tx["gas"] = 250_000
+        else:
+            try:
+                est_tx = tx.copy()
+                est_tx.pop("gas", None)
+                async with self._rpc_call():
+                    est = await self.w3.eth.estimate_gas(est_tx)
+                tx["gas"] = int(est * 1.2)
+            except Exception:
+                tx["gas"] = 400_000
 
+        RunLogger.log_event(
+            "tx_built",
+            worker_id=self._uid,
+            wallet=self._acct.address,
+            mint_mode=self._cfg.mint_mode,
+            gas=tx.get("gas"),
+            value=tx.get("value", 0),
+            elapsed_ms=round((time.perf_counter() - t0) * 1000, 2),
+        )
         return tx
 
     # ------------------------------------------------------------------
     # Mint price resolution
     # ------------------------------------------------------------------
-    async def _resolve_mint_price(self, nft_addr_c: str) -> int:
-        """
-        Attempt to resolve the mint price in wei using a 3-tier fallback:
+    @async_error_handler(retries=999, delay=2.0)
+    async def run_protocol(self):
+        RunLogger.log_event("worker_start", worker_id=self._uid, wallet=self._acct.address)
+        nft_addr_c = AsyncWeb3.to_checksum_address(self._cfg.target_nft)
 
         1. MINT_PRICE_ETH env var (manual override — highest priority)
         2. SeaDrop getPublicDrop() — for SEADROP / SEADROP_WL modes
@@ -611,9 +537,71 @@ class ExecutionUnit:
             await self._log("INFO", f"[Price] Using manual override: {cfg.mint_price_eth} ETH ({price_wei} wei)")
             return price_wei
 
-        # Tier 2: SeaDrop getPublicDrop (works for SEADROP / SEADROP_WL)
-        #  — skip in DIRECT/PROXY mode to avoid confusing log noise
-        if cfg.mint_mode in ("SEADROP", "SEADROP_WL"):
+        total_value = mint_price * self._cfg.qty
+
+        # Fetch wallet balance
+        async with self._rpc_call():
+            bal_wei = await self.w3.eth.get_balance(self._acct.address)
+        bal_eth = bal_wei / 1e18
+        await self._update_worker("INIT", f"{bal_eth:.5f} {self._symbol}", "Initialized")
+        await self._log("INFO", f"Wallet: {self._acct.address[:8]}... | Bal: {bal_eth:.5f} {self._symbol}")
+
+        # ---- Mempool Sniper & Time Sniper ----
+        current_time = int(time.time())
+        pre_signed_raw = None
+
+        if self._cfg.mempool_sniping_enabled:
+            await self._log("WARNING", "Mempool Sniper active. Worker holding execution...")
+            await self._update_worker("WAITING", f"{bal_eth:.5f}", "Holding for mempool trigger")
+            from src.orchestrator import orchestrator
+            await orchestrator.snipe_event.wait()
+            await self._log("SUCCESS", "🚀 MEMPOOL TRIGGER DETECTED! Executing mint NOW!")
+        elif start_time > current_time and not self._cfg.force_start:
+            wait_seconds = start_time - current_time
+            unlock_dt = datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
+            await self._log("WARNING", f"[Time Sniper] Opens at: {unlock_dt}. Sleeping {wait_seconds:.0f}s...")
+            await self._update_worker("WAITING", f"{bal_eth:.5f}", f"Sleeping until {unlock_dt}")
+
+            if self._cfg.presign_enabled and wait_seconds > 10:
+                # Sleep until 5s before mint, then pre-sign
+                sleep_main = wait_seconds - 5
+                if sleep_main > 0:
+                    await asyncio.sleep(sleep_main)
+
+                await self._log("INIT", "[God Mode] Pre-signing TX...")
+                try:
+                    nonce = await self._nonce_mgr.get_nonce()
+                    gas_params = await self._get_gas_params()
+                    # Use multiplied gas for pre-sign to avoid stuck
+                    if "maxFeePerGas" in gas_params:
+                        gas_params["maxFeePerGas"] = int(gas_params["maxFeePerGas"] * self._cfg.presign_gas_mult)
+                    else:
+                        gas_params["gasPrice"] = int(gas_params.get("gasPrice", 0) * self._cfg.presign_gas_mult)
+
+                    tx = await self._build_mint_tx(nft_addr_c, total_value, gas_params, nonce)
+                    if tx:
+                        tx["gas"] = self._cfg.presign_gas_limit
+                        signed = self._acct.sign_transaction(tx)
+                        pre_signed_raw = signed.raw_transaction
+                        await self._log("SUCCESS", "TX locked. Waiting for trigger...")
+                except Exception as e:
+                    await self._log("ERROR", f"God Mode failed: {e}")
+
+                # Sleep the final few seconds
+                remaining = start_time - int(time.time())
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            else:
+                if wait_seconds > 2:
+                    await asyncio.sleep(wait_seconds - 2)
+
+            await self._log("SUCCESS", "🚀 WAKE UP! Executing mint NOW!")
+
+        # ---- Mint loop ----
+        attempt = 0
+        last_gas_params = None
+
+        while True:
             try:
                 sea_contract = self.w3.eth.contract(
                     address=AsyncWeb3.to_checksum_address(cfg.sea_addr),
@@ -628,29 +616,130 @@ class ExecutionUnit:
             except Exception as exc:
                 await self._log("WARNING", f"[Price] SeaDrop lookup failed: {exc} — trying direct call")
 
-        # Tier 3: common price getter functions on the NFT contract itself
-        price_abi = [
-            {"inputs": [], "name": "mintPrice",  "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [], "name": "price",       "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [], "name": "cost",        "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [], "name": "PRICE",       "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
-            {"inputs": [], "name": "mintCost",   "outputs": [{"type": "uint256"}], "stateMutability": "view", "type": "function"},
-        ]
-        nft_contract = self.w3.eth.contract(address=nft_addr_c, abi=price_abi)
-        for fn_name in ("mintPrice", "price", "cost", "PRICE", "mintCost"):
-            try:
-                fn = getattr(nft_contract.functions, fn_name)
-                price_wei = await asyncio.wait_for(fn().call(), timeout=4)
-                price_wei = int(price_wei)
-                await self._log("INFO", f"[Price] {fn_name}(): {price_wei / 1e18:.6f} ETH")
-                return price_wei
-            except Exception:
-                continue
+                # Phase 2 Speed: Only re-fetch balance if we don't have enough
+                if bal_wei < total_value:
+                    async with self._rpc_call():
+                        bal_wei = await self.w3.eth.get_balance(self._acct.address)
+                    bal_eth = bal_wei / 1e18
 
-        # Tier 4: assume free mint
-        await self._log("INFO", "[Price] Could not determine mint price — assuming free mint (0 ETH). "
-                                 "Set MINT_PRICE_ETH in .env if the contract requires payment.")
-        return 0
+                await self._update_worker("MINTING", f"{bal_eth:.5f}", "Initiating sequence")
+
+                if bal_wei < total_value:
+                    gap = (total_value - bal_wei) / 1e18
+                    await self._log("WARNING", f"Insufficient balance. Deficit: {gap:.5f} {self._symbol}. Waiting...")
+                    await self._update_worker("WAITING", f"{bal_eth:.5f}", "Waiting for funds")
+                    await asyncio.sleep(random.uniform(*self._cfg.delay_range))
+                    continue
+
+                # Broadcast pre-signed TX first
+                if pre_signed_raw:
+                    await self._log("INFO", "🚀 Broadcasting pre-signed TX...")
+                    tx_hash = await self._broadcast_race(pre_signed_raw)
+                    pre_signed_raw = None
+                else:
+                    # Build and sign fresh TX
+                    attempt += 1
+                    nonce = await self._nonce_mgr.get_nonce()
+
+                    # Gas bumping for stuck TXs
+                    if attempt > 1 and last_gas_params:
+                        gas_params = await gas_oracle.bump_gas_params(last_gas_params, attempt - 1)
+                        await self._log("WARNING", f"[Gas Bump] Attempt {attempt} — bumping gas x{attempt}")
+                    else:
+                        gas_params = await self._get_gas_params()
+
+                    if self._cfg.mempool_sniping_enabled and self._cfg.snipe_gas_multiplier > 1.0:
+                        gas_params = gas_params.copy()
+                        if "maxPriorityFeePerGas" in gas_params:
+                            gas_params["maxPriorityFeePerGas"] = int(gas_params["maxPriorityFeePerGas"] * self._cfg.snipe_gas_multiplier)
+                        if "maxFeePerGas" in gas_params:
+                            gas_params["maxFeePerGas"] = int(gas_params["maxFeePerGas"] * self._cfg.snipe_gas_multiplier)
+                        if "gasPrice" in gas_params:
+                            gas_params["gasPrice"] = int(gas_params["gasPrice"] * self._cfg.snipe_gas_multiplier)
+                        await self._log("INFO", f"Sniping Gas Boost x{self._cfg.snipe_gas_multiplier} applied.")
+
+                    last_gas_params = gas_params
+
+                    tx = await self._build_mint_tx(nft_addr_c, total_value, gas_params, nonce)
+                    if tx is None:
+                        return
+
+                    # Simulate before broadcast
+                    if not self._cfg.skip_simulation:
+                        sim_t0 = time.perf_counter()
+                        ok, reason = await self._simulate_tx(tx)
+                        RunLogger.log_event(
+                            "tx_simulated",
+                            worker_id=self._uid,
+                            wallet=self._acct.address,
+                            ok=ok,
+                            reason=reason,
+                            elapsed_ms=round((time.perf_counter() - sim_t0) * 1000, 2),
+                        )
+                        if not ok:
+                            await self._log("ERROR", f"TX simulation reverted: {reason}. Skipping.")
+                            self._nonce_mgr.fail(nonce)
+                            await dlq.push(self._uid, self._acct.address, f"Sim reverted: {reason}", attempt)
+                            return
+
+                    signed = self._acct.sign_transaction(tx)
+
+                    if self._cfg.flashbots_mode:
+                        await self._log("INFO", "[Flashbots] Submitting via private mempool...")
+                        tx_hash_str = await self._send_via_flashbots(signed.raw_transaction)
+                        tx_hash = bytes.fromhex(tx_hash_str.lstrip("0x"))
+                    else:
+                        broadcast_t0 = time.perf_counter()
+                        tx_hash = await self._broadcast_race(signed.raw_transaction)
+                        RunLogger.log_event(
+                            "tx_broadcast",
+                            worker_id=self._uid,
+                            wallet=self._acct.address,
+                            tx_hash=tx_hash.hex(),
+                            elapsed_ms=round((time.perf_counter() - broadcast_t0) * 1000, 2),
+                        )
+                        self._nonce_mgr.confirm(nonce)
+
+                await self._log("INFO", f"TX Broadcast: {tx_hash.hex()}", tx_hash.hex())
+                await self._update_worker("CONFIRMING", f"{bal_eth:.5f}", f"TX: {tx_hash.hex()[:10]}...")
+
+                # Wait for receipt
+                receipt_t0 = time.perf_counter()
+                async with self._rpc_call():
+                    receipt = await self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+                RunLogger.log_event(
+                    "tx_receipt",
+                    worker_id=self._uid,
+                    wallet=self._acct.address,
+                    tx_hash=tx_hash.hex(),
+                    status=int(receipt.status),
+                    gas_used=getattr(receipt, "gasUsed", 0),
+                    elapsed_ms=round((time.perf_counter() - receipt_t0) * 1000, 2),
+                )
+
+                if receipt.status == 1:
+                    await self._log("SUCCESS", "✅ Mint confirmed!", tx_hash.hex())
+                    await self._update_worker("SUCCESS", f"{bal_eth:.5f}", f"Minted! TX: {tx_hash.hex()[:10]}")
+                    await self._handle_success(tx_hash, receipt, total_value, nft_addr_c)
+                    return
+                else:
+                    reason = await self._replay_revert_reason(
+                        tx_hash,
+                        receipt,
+                        tx if 'tx' in locals() else None,
+                    )
+                    await self._log("ERROR", f"TX reverted on-chain: {reason}")
+                    self._nonce_mgr.fail(nonce if 'nonce' in locals() else 0)
+                    await dlq.push(self._uid, self._acct.address, f"On-chain revert: {reason}", attempt)
+                    return
+
+            except asyncio.CancelledError:
+                await self._update_worker("STOPPED", "", "Cancelled")
+                return
+            except Exception as e:
+                await self._log("ERROR", f"Worker error: {str(e)[:80]}")
+                await self._rotate_rpc()
+                raise
 
     # ------------------------------------------------------------------
     # Public API for Orchestrator

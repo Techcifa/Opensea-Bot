@@ -82,6 +82,12 @@ class RpcHealthChecker:
 
         return sorted(pool, key=sort_key)
 
+    def reload_config(self):
+        """Refresh pools after ConfigurationManager mutates NETWORKS."""
+        self.healthy_rpcs = {
+            ticker: list(info["rpc"]) for ticker, info in NETWORKS.items()
+        }
+
     async def _loop(self):
         while True:
             try:
@@ -106,18 +112,29 @@ class RpcHealthChecker:
         payload = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
         start = time.perf_counter()
         try:
-            async with session.post(url, json=payload) as resp:
-                data = await resp.json()
-                if "result" in data:
-                    latency = int((time.perf_counter() - start) * 1000)
-                    pool = self.healthy_rpcs.setdefault(ticker, [])
-                    if url not in pool:
-                        pool.append(url)
-                    curr = self.stats.get(url, {"latency": latency, "score": 0.5})
-                    curr["latency"] = int(curr["latency"] * 0.7 + latency * 0.3)
-                    curr["score"]   = min(1.0, curr["score"] + 0.1)
-                    self.stats[url] = curr
-                    return
+            if url.startswith("wss://") or url.startswith("ws://"):
+                import websockets
+                import json
+                async with websockets.connect(url, close_timeout=2) as ws:
+                    await ws.send(json.dumps(payload))
+                    resp = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    data = json.loads(resp)
+                    if "result" in data:
+                        # Mark healthy
+                        pool = self.healthy_rpcs.setdefault(ticker, [])
+                        if url not in pool:
+                            pool.append(url)
+                        return
+            else:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+                    async with s.post(url, json=payload) as resp:
+                        data = await resp.json()
+                        if "result" in data:
+                            # Mark healthy
+                            pool = self.healthy_rpcs.setdefault(ticker, [])
+                            if url not in pool:
+                                pool.append(url)
+                            return
         except Exception:
             pass
 

@@ -1461,6 +1461,15 @@
         <div class="card-body" style="padding:14px">
           <div class="chart-wrap"><canvas id="gasChart"></canvas></div>
         </div>
+        <div class="field"><label>Snipe Target Method</label>
+          <input id="cfg-snipe-method" type="text" placeholder="e.g. flipMintState">
+        </div>
+        <div class="field"><label>Contract Owner Address</label>
+          <input id="cfg-contract-owner" type="text" placeholder="0x...">
+        </div>
+        <div class="field"><label>Snipe Gas Multiplier</label>
+          <input id="cfg-snipe-gas-mult" type="number" value="1.5" step="0.1">
+        </div>
       </div>
 
       <div class="card">
@@ -1473,6 +1482,9 @@
 
           </div>
           <div class="preflight-wrap" style="margin-top:16px" id="preflight-area"></div>
+        </div>
+        <div class="toggle-row"><label>Mempool Sniping (Phase 3)</label>
+          <label class="toggle"><input type="checkbox" id="tog-mempool"><span class="slider"></span></label>
         </div>
       </div>
     </div>
@@ -1872,14 +1884,159 @@
       <span class="log-wid">#${e.wid}</span>
       <span class="log-msg">${escHtml(e.msg)}</span>
     </div>`;
-      }).join('');
-      if (atBottom) feed.scrollTop = feed.scrollHeight;
-    }
-    function clearLog() { allLogs = []; filteredLogs = []; document.getElementById('log-feed').innerHTML = '' }
-    function escHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') }
-    function exportLogs() {
-      const blob = new Blob([JSON.stringify(allLogs, null, 2)], { type: 'application/json' });
-      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'mint_log.json'; a.click();
+  }).join('');
+  if(atBottom)feed.scrollTop=feed.scrollHeight;
+}
+function clearLog(){allLogs=[];filteredLogs=[];document.getElementById('log-feed').innerHTML=''}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function exportLogs(){
+  const blob=new Blob([JSON.stringify(allLogs,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='mint_log.json';a.click();
+}
+
+// ── KEY VAULT (AES-256-GCM) ──
+async function deriveKey(password){
+  const enc=new TextEncoder();
+  const keyMaterial=await crypto.subtle.importKey('raw',enc.encode(password),{name:'PBKDF2'},false,['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {name:'PBKDF2',salt:enc.encode('nft-minter-salt-v2'),iterations:100000,hash:'SHA-256'},
+    keyMaterial,{name:'AES-GCM',length:256},false,['encrypt','decrypt']
+  );
+}
+async function encryptKeys(){
+  const pwd=document.getElementById('vault-pwd').value;
+  const raw=document.getElementById('key-input').value.trim().split('\n').filter(k=>k.trim());
+  if(!pwd){alert('Enter a vault password first.');return}
+  if(!raw.length){alert('No keys entered.');return}
+  const key=await deriveKey(pwd);
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const enc=new TextEncoder();
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(JSON.stringify(raw)));
+  encryptedKeys={iv:Array.from(iv),ct:Array.from(new Uint8Array(ct))};
+  rawKeys=raw;
+  document.getElementById('key-input').value='[ENCRYPTED — '+raw.length+' key(s)]';
+  document.getElementById('vault-pwd').value='';
+  document.getElementById('vault-status').textContent='✅ '+raw.length+' key(s) encrypted with AES-256-GCM. Ready to launch.';
+  log('SYS','SUCCESS',raw.length+' keys encrypted in vault.');
+}
+function clearKeys(){
+  encryptedKeys=null;rawKeys=[];
+  document.getElementById('key-input').value='';
+  document.getElementById('vault-pwd').value='';
+  document.getElementById('vault-status').textContent='';
+}
+
+// ── CONFIG BUILDER ──
+function buildConfigOverrides(){
+  const cfg={
+    NETWORK:document.getElementById('cfg-network').value,
+    NFT_CONTRACT_ADDRESS:document.getElementById('cfg-contract').value,
+    MINT_QUANTITY:document.getElementById('cfg-qty').value,
+    MINT_MODE:document.getElementById('cfg-mode').value,
+    MINT_FUNC_NAME:document.getElementById('cfg-func').value,
+    MAX_WORKERS:document.getElementById('cfg-workers').value,
+    GAS_CEILING_GWEI:document.getElementById('cfg-gas-ceil').value,
+    MAX_GAS_LIMIT:document.getElementById('cfg-gas-max').value,
+    PRE_SIGN_GAS_LIMIT:document.getElementById('cfg-presign-gas').value,
+    RETRY_DELAY_MIN:document.getElementById('cfg-delay-min').value,
+    RETRY_DELAY_MAX:document.getElementById('cfg-delay-max').value,
+    RECIPIENT_ADDRESS:document.getElementById('cfg-recipient').value,
+    FORCE_START:document.getElementById('tog-force').checked?'true':'false',
+    PRE_SIGN_ENABLED:document.getElementById('tog-presign').checked?'true':'false',
+    FLASHBOTS_MODE:document.getElementById('tog-flashbots').checked?'true':'false',
+    AUTO_FUND_ENABLED:document.getElementById('tog-fund').checked?'true':'false',
+    AUTO_TRANSFER_ENABLED:document.getElementById('tog-transfer').checked?'true':'false',
+    AUTO_SWEEP_ETH:document.getElementById('tog-sweep').checked?'true':'false',
+    DISCORD_ENABLED:document.getElementById('tog-discord').checked?'true':'false',
+    VERIFY_CONTRACT_ENABLED:document.getElementById('tog-verify').checked?'true':'false',
+    ACCOUNTANT_ENABLED:document.getElementById('tog-account').checked?'true':'false',
+    MEMPOOL_SNIPING_ENABLED:document.getElementById('tog-mempool').checked?'true':'false',
+    SNIPE_TARGET_METHOD:document.getElementById('cfg-snipe-method').value,
+    CONTRACT_OWNER_ADDRESS:document.getElementById('cfg-contract-owner').value,
+    SNIPE_GAS_MULTIPLIER:document.getElementById('cfg-snipe-gas-mult').value,
+  };
+  const osKey=document.getElementById('cfg-os-api').value.trim();
+  if(osKey)cfg.OS_API_KEY=osKey;
+  return cfg;
+}
+function getKeys(){
+  if(rawKeys.length)return rawKeys;
+  const raw=document.getElementById('key-input').value.trim().split('\n').filter(k=>k.trim()&&!k.includes('ENCRYPTED'));
+  return raw;
+}
+
+// ── BOT CONTROL ──
+async function launchBot(){
+  const keys=getKeys();
+  if(!keys.length){alert('Add private keys to the Key Vault first.');return}
+  document.getElementById('btn-launch').disabled=true;
+  log('SYS','INFO','Sending launch command...');
+  try{
+    const r=await fetch('/api/start',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({keys,config_overrides:buildConfigOverrides()})
+    });
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'Start failed');
+    log('SYS','SUCCESS','Bot started with '+d.workers+' workers.'+(d.turbo_enabled?' Turbo mode enabled from preflight.':''));
+    setStatus('STARTING');
+  }catch(e){
+    log('SYS','ERROR','Launch failed: '+e.message);
+    document.getElementById('btn-launch').disabled=false;
+  }
+}
+async function stopBot(){
+  log('SYS','WARNING','Sending stop command...');
+  await fetch('/api/stop',{method:'POST'});
+  setStatus('STOPPED');
+}
+
+// ── PREFLIGHT ──
+async function runPreflight(){
+  const keys=getKeys();
+  if(!keys.length){alert('Add keys first.');return}
+  const area=document.getElementById('preflight-area');
+  area.innerHTML='<p class="text-muted">⏳ Running preflight checks...</p>';
+  try{
+    const r=await fetch('/api/preflight',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({keys, config_overrides: buildConfigOverrides()})
+    });
+    const d=await r.json();
+    const icons={ok:'✅',warn:'⚠️',error:'❌'};
+    area.innerHTML='<div class="preflight-list">'+
+      d.checks.map(c=>`<div class="check-item ${c.status}">
+        <span class="check-icon">${icons[c.status]||'ℹ️'}</span>
+        <div><strong>${c.label}</strong> — ${c.detail||''}</div>
+      </div>`).join('')+
+      (d.turbo_ready?'<div class="check-item ok"><span class="check-icon">✅</span><div><strong>Turbo Ready</strong> — Launch will pre-sign and skip runtime simulation/gas estimate for this exact setup.</div></div>':'')+
+      '</div>';
+  }catch(e){
+    area.innerHTML='<p class="text-muted">Preflight error: '+e.message+'</p>';
+  }
+}
+
+// ── HISTORY ──
+async function loadHistory(){
+  try{
+    const r=await fetch('/api/history');
+    const d=await r.json();
+    const body=document.getElementById('history-body');
+    if(!d.rows||!d.rows.length){
+      body.innerHTML='<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted)">No history yet.</td></tr>';
+    }else{
+      body.innerHTML=d.rows.map(row=>`<tr>
+        <td>${row.timestamp||'-'}</td>
+        <td><span class="tag tag-cyan">${row.network||'-'}</span></td>
+        <td class="hash-cell">${row.wallet||'-'}</td>
+        <td><span class="tag tag-green">${row.event||'-'}</span></td>
+        <td class="hash-cell"><a href="#" class="tx-link">${row.tx_hash?row.tx_hash.slice(0,16)+'...':'-'}</a></td>
+        <td>${row.gas_used||'-'}</td>
+        <td>${row.gas_price_gwei||'-'}</td>
+        <td style="font-weight:700;color:var(--red)">${row.eth_spent||'-'}</td>
+      </tr>`).join('');
+      // Update P&L
+      calcPnL(d.rows);
     }
 
     // ── KEY VAULT (AES-256-GCM) ──
